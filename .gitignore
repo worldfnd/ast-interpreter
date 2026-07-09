@@ -1,0 +1,5 @@
+/target
+# Per-package nargo build output and mavros SSA debug dumps, if tooling is run inside a fixture.
+# The fixtures/ Noir sources themselves are committed; only these generated artifacts are ignored.
+**/target/
+**/mavros_debug/
