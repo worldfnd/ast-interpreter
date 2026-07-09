@@ -1,0 +1,6 @@
+[package]
+name = "neg_reachable_error"
+type = "bin"
+authors = [""]
+
+[dependencies]
