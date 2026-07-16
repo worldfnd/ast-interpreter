@@ -1,9 +1,6 @@
-//! Property-based fuzzer for the crate's **field-agnostic value semantics**.
-//!
-//! These properties cover checked/wrapping arithmetic, casts, shifts, division/modulo, and
-//! integer-to-field encoding across supported fields.
-//!
-//! Scope is value logic only: no ASTs, interpreter, or Noir project compilation.
+//! Property-based fuzzer for the crate's field-agnostic value semantics: checked/wrapping
+//! arithmetic, casts, shifts, division/modulo, and integer-to-field encoding across supported
+//! fields. Scope is value logic only — no ASTs, interpreter, or Noir project compilation.
 
 use acvm::{AcirField, FieldElement};
 use num_bigint::BigInt;
@@ -58,7 +55,7 @@ fn same_typed_pair() -> impl Strategy<Value = (IntValue, IntValue)> {
 }
 
 proptest! {
-    /// P1 — checked Add/Sub/Mul errors exactly outside the type range.
+    /// Checked Add/Sub/Mul errors exactly outside the type range.
     #[test]
     fn p1_checked_matches_range(
         (a, b) in same_typed_pair(),
@@ -95,7 +92,7 @@ proptest! {
         }
     }
 
-    /// P2 — signedness flips and widen/narrow casts preserve the expected value.
+    /// Signedness flips and widen/narrow casts preserve the expected value.
     #[test]
     fn p2_cast_roundtrips(
         (signed, bits) in int_type(),
@@ -118,7 +115,7 @@ proptest! {
         prop_assert_eq!(&narrow.value, &v.value);
     }
 
-    /// P3(a) — shifting by `amount >= bits` overflows in both directions.
+    /// Shifting by `amount >= bits` overflows in both directions.
     #[test]
     fn p3a_over_shift_errors(
         bits in width(),
@@ -135,7 +132,7 @@ proptest! {
         prop_assert!(matches!(shr, Err(InterpretError::Overflow(_))), "shr: {shr:?}");
     }
 
-    /// P3(b) — in-range shifts match independent arithmetic references.
+    /// In-range shifts match independent arithmetic references.
     #[test]
     fn p3b_in_range_shifts(
         (signed, bits) in int_type(),
@@ -172,7 +169,7 @@ proptest! {
         );
     }
 
-    /// P4 — integer-to-field encoding reduces the bit pattern modulo the active field.
+    /// Integer-to-field encoding reduces the bit pattern modulo the active field.
     #[test]
     fn p4_field_roundtrip(
         (signed, bits) in int_type(),
@@ -193,7 +190,7 @@ proptest! {
         }
     }
 
-    /// P5 — div/mod handle zero, signed MIN/-1, and `q * b + r == a`.
+    /// Div/mod handle zero, signed MIN/-1, and `q * b + r == a`.
     #[test]
     fn p5_div_mod_law((a, b) in same_typed_pair()) {
         let signed = a.signed;
@@ -219,7 +216,7 @@ proptest! {
     }
 }
 
-// Deterministic coverage for P5's rare error paths.
+// Deterministic coverage for the div/mod error paths the property tests hit only rarely.
 
 /// Division/modulo by a zero divisor is `DivisionByZero` for every signedness/width.
 #[test]

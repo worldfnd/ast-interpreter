@@ -8,16 +8,10 @@ use super::error::InterpretError;
 
 /// A runtime value produced while interpreting the monomorphized AST.
 ///
-/// This field-agnostic value logic is the core instrument behind the cross-field differential:
-/// because integers carry an explicit width + signedness and a `BigInt` magnitude (not a
-/// field-reduced value), the same computation yields identical integer/bool results in bn254 and
-/// Goldilocks — which is exactly what proves the field shrink did not corrupt the AST.
-///
-/// Integers carry their own width + signedness and a `BigInt` of the canonical mathematical
-/// value, so beyond-field magnitudes (a `u64` ≥ the source field's modulus) are represented
-/// faithfully — the property the SSA interpreter could not provide. `Field` values use the
-/// compiled-in [`FieldElement`] (bn254 by default, Goldilocks under `--features goldilocks`),
-/// so field arithmetic is correct for whichever field the frontend was built with.
+/// Integers carry an explicit width, signedness, and a `BigInt` of the canonical mathematical value
+/// (not a field-reduced one), so a `u64` at or above the field modulus survives intact and the same
+/// computation yields identical integer/bool results under bn254 and Goldilocks — the property the
+/// cross-field differential checks. `Field` values use the compiled-in [`FieldElement`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Field(FieldElement),

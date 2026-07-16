@@ -1,12 +1,9 @@
-//! Test oracle that runs a Noir program through Noir's ACVM/Brillig executor.
+//! Test oracle that runs a Noir program through Noir's ACVM/Brillig executor, so tests can compare
+//! its decoded return value with the interpreter's. Mirrors the compile-then-execute sequence in
+//! Noir's `tooling/artifact_cli/src/execution.rs`, reimplemented to avoid the CLI crate dependency.
 //!
-//! Tests compare this decoded return value with the AST interpreter's result.
-//!
-//! Mirrors the compile-then-execute sequence in Noir's `tooling/artifact_cli/src/execution.rs`
-//! (reimplemented here to avoid depending on the CLI crate).
-//!
-//! Under `goldilocks`, many programs cannot compile until the crypto stdlib supports the smaller
-//! field, so asserting tests are currently gated to bn254.
+//! Under `goldilocks` many programs cannot compile until the crypto stdlib supports the smaller
+//! field, so asserting tests are gated to bn254.
 
 use noirc_abi::input_parser::{Format, InputValue};
 use noirc_abi::{InputMap, MAIN_RETURN_NAME};

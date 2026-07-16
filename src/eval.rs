@@ -553,8 +553,8 @@ fn update_path(value: Value, path: &[Step], new: Value) -> Result<Value, Interpr
     }
 }
 
-// `pub(crate)` so the Part 3 value-semantics fuzzer (`value_proptest.rs`) can drive the real
-// integer op dispatcher directly with random inputs; visibility only, semantics unchanged.
+// `pub(crate)` so the value-semantics fuzzer (`value_proptest.rs`) can drive the integer op
+// dispatcher directly; visibility only.
 pub(crate) fn eval_int_binary(
     op: BinaryOpKind,
     a: IntValue,

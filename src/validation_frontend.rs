@@ -1,5 +1,4 @@
 //! Test-support: drive Noir's frontend to a monomorphized AST for the interpreter to validate.
-//!
 //! Under `goldilocks`, dependency-only elaboration errors are tolerated until the crypto stdlib
 //! supports the smaller field.
 
@@ -95,20 +94,15 @@ pub(crate) fn compile_for_validation(
     Ok(Validated { program, abi })
 }
 
-/// Handle the whole-crate `check_crate` result, returning the set of files whose elaboration
-/// errors were *tolerated*.
+/// Handle the whole-crate `check_crate` result, returning the set of files whose elaboration errors
+/// were *tolerated*.
 ///
 /// Under `goldilocks` the auto-injected bn254 crypto stdlib does not type-check (254-bit `Field`
-/// constants, values >= p), so errors confined to files outside the user's package are tolerated
-/// and their files returned; errors in the user's own package stay fatal. Note "outside the
-/// package" covers *any* non-package crate, not just the stdlib — a broken user dependency is
-/// tolerated too, bounded by the same invariant below. Tolerating an error is only sound together
-/// with [`reject_code_from_tolerated_files`]: most elaboration type errors do not produce HIR
-/// `Error` nodes — the wrongly-typed expression stays in the HIR — so reached broken code could
-/// otherwise monomorphize *silently* into a wrong AST.
-///
-/// Under bn254 the stdlib is clean and any error is fatal (the strict behaviour); the returned
-/// set is empty.
+/// constants, values >= p), so errors in any file outside the user's package (the stdlib, or a
+/// broken dependency) are tolerated and their files returned; errors in the package stay fatal.
+/// Tolerance is only sound together with [`reject_code_from_tolerated_files`]: most type errors
+/// leave the wrongly-typed expression in the HIR rather than an `Error` node, so reached broken
+/// code could otherwise monomorphize *silently* into a wrong AST. Under bn254 the set is empty.
 #[cfg_attr(not(feature = "goldilocks"), allow(unused_variables))]
 fn tolerated_dependency_error_files(
     context: &Context,
@@ -141,16 +135,15 @@ fn tolerated_dependency_error_files(
     }
 }
 
-/// Reject a monomorphized program that contains code from any file whose elaboration errors were
-/// tolerated by [`tolerated_dependency_error_files`]. Such code may be silently mistyped, so a
-/// program reaching it cannot be trusted — failing loudly here is what makes the tolerance sound.
+/// Reject a monomorphized program containing code from any file whose elaboration errors were
+/// tolerated by [`tolerated_dependency_error_files`]. Such code may be silently mistyped, so failing
+/// loudly here is what makes the tolerance sound.
 ///
-/// Precise scope: the monomorphizer records the defining file of every function, global, trait
-/// constant, and trait-impl associated constant it monomorphizes, so the resulting mono-AST
-/// provably contains no *code or inlined constant* from a file that failed elaboration. Values
-/// folded during elaboration itself (a dependency global used as an array length, comptime
-/// evaluation) leave no monomorphization-time trace and are a documented residual risk until the
-/// stdlib port removes the tolerated errors entirely.
+/// The monomorphizer records the defining file of every function, global, and trait constant it
+/// lowers, so the mono-AST provably contains no *code or inlined constant* from a failed file.
+/// Values folded during elaboration itself (a dependency global used as an array length, comptime
+/// evaluation) leave no trace here — a residual risk until the stdlib port removes the tolerated
+/// errors entirely.
 fn reject_code_from_tolerated_files(
     file_manager: &FileManager,
     monomorphizer: &Monomorphizer,

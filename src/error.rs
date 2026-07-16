@@ -2,14 +2,15 @@ use noirc_errors::Location;
 
 /// A failure encountered while interpreting the monomorphized AST.
 ///
-/// `AssertionFailed` is the oracle's signal: the program's own `assert`s encode its expected
-/// results, so a failed assertion means the AST does not compute what the source claims.
-/// `Unsupported` marks an AST construct the interpreter does not yet evaluate — kept explicit
-/// (never silently skipped) so coverage gaps are loud.
+/// `AssertionFailed` is the oracle's signal: a program's own `assert`s encode its expected results,
+/// so a failed assertion means the AST does not compute what the source claims.
 #[derive(Debug)]
 pub enum InterpretError {
     /// An `assert`/`constrain` evaluated to false.
-    AssertionFailed { location: Location, message: Option<String> },
+    AssertionFailed {
+        location: Location,
+        message: Option<String>,
+    },
     /// Checked integer arithmetic overflowed the operand type (Noir's `+`/`-`/`*` are checked).
     Overflow(String),
     /// Integer or field division by zero.
