@@ -40,7 +40,8 @@ goldilocks = [
     "noirc_driver/goldilocks",
 ]
 
-# Optional integration oracle. Empty while the dependency above is disabled.
+# Integration oracle against the Mavros compiler. Fails to build with a clear message until the
+# mavros-compiler dependency is available; becomes ["dep:mavros-compiler"] then.
 mavros-oracle = []
 
 [lints]
@@ -61,58 +62,23 @@ repository = "https://github.com/worldfnd/ast-interpreter"
 [workspace.dependencies]
 # The Noir crates, pinned to a single git revision so the interpreter and the compiler cannot drift
 # onto mismatched sources (the compiled-in field is a global).
-acvm = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "acvm" }
-bn254_blackbox_solver = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "bn254_blackbox_solver", default-features = false }
-fm = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "fm" }
-nargo = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "nargo" }
-nargo_toml = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "nargo_toml" }
-noirc_abi = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "noirc_abi" }
-noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "noirc_artifacts" }
-noirc_driver = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/worldfnd/noir.git", branch = "ys/goldilocks-port", package = "noirc_frontend" }
+acvm = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "acvm" }
+bn254_blackbox_solver = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "bn254_blackbox_solver", default-features = false }
+fm = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "fm" }
+nargo = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "nargo" }
+nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_abi" }
+noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_artifacts" }
+noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_frontend" }
 
 # Shared crates.
 serde = { version = "1.0.204", features = ["derive"] }
 tempfile = { version = "3.19.1" }
 
-[profile.release]
-debug = true
-opt-level = "z"
-lto = true
-
-# These should be inherited in workspace packages using `[lints] workspace = true`
+# Keep clippy defaults (correctness denied, perf/suspicious warned); only silence the two noisiest
+# groups so real bugs still surface.
 [workspace.lints.clippy]
-# Allow all except performance and correctness by default.
-all = { level = "allow", priority = -1 }
-cargo = { level = "allow", priority = -1 }
-complexity = { level = "allow", priority = -1 }
-nursery = { level = "allow", priority = -1 }
-pedantic = { level = "allow", priority = -1 }
-restriction = { level = "allow", priority = -1 }
 style = { level = "allow", priority = -1 }
-suspicious = { level = "allow", priority = -1 }
-
-# Then we turn on the ones we care about, focusing on reducing needlessly silly code.
-cast_slice_from_raw_parts = "deny"
-clone_on_copy = "deny"
-crosspointer_transmute = "deny"
-drop_non_drop = "deny"
-expect_fun_call = "deny"
-for_kv_map = "deny"
-from_raw_with_void_ptr = "deny"
-let_and_return = "deny"
-let_underscore_future = "deny"
-multi_assignments = "deny"
-needless_borrows_for_generic_args = "deny"
-needless_return = "deny"
-octal_escapes = "deny"
-only_used_in_recursion = "deny"
-ptr_offset_with_cast = "deny"
-redundant_closure = "deny"
-single_match = "deny"
-size_of_ref = "deny"
-to_string_in_format_args = "deny"
-unconditional_recursion = "deny"
-unnecessary_cast = "deny"
-useless_conversion = "deny"
+complexity = { level = "allow", priority = -1 }

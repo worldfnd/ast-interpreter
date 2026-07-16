@@ -1,8 +1,3 @@
-# Noir's frontend (name resolution / elaboration / monomorphization, invoked by the tests via
-# `compile_for_validation`) recurses deeply. The `ys/goldilocks-port` (beta.22) bump pushed even
-# small fixtures past libtest's default ~2 MB per-test-thread stack — a stack overflow, NOT a logic
-# bug: the very same tests pass unchanged with a larger stack. `nargo` itself runs the compiler on an
-# enlarged stack for this reason. Give every cargo-spawned process (incl. libtest's test threads) a
-# generous 64 MB min stack so `cargo test` / `cargo test --features goldilocks` pass with no extra flags.
+# 64 MB min stack: Noir's frontend recurses deep and libtest's default ~2 MB overflows on it.
 [env]
 RUST_MIN_STACK = "67108864"
