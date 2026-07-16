@@ -1,0 +1,6 @@
+[package]
+name = "interp_inputs_struct"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -1,0 +1,6 @@
+[package]
+name = "interp_inputs_mixed"
+type = "bin"
+authors = [""]
+
+[dependencies]
