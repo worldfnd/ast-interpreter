@@ -1,7 +1,5 @@
-//! Test loader for a Noir package using the stock stdlib.
-//!
-//! It resolves `Nargo.toml`, parses package sources, and exposes the inputs needed by
-//! `nargo::prepare_package`.
+//! Test loader for a Noir package using the stock stdlib: resolves `Nargo.toml`, parses the
+//! sources, and exposes the inputs `nargo::prepare_package` needs.
 
 use std::path::PathBuf;
 
@@ -58,8 +56,9 @@ impl PackageSource for NoirProject {
     }
 }
 
-/// Package source for the optional `mavros-oracle` integration path.
-#[cfg(feature = "mavros-oracle")]
+// Parked behind an always-false cfg until the mavros-compiler dependency is available; restore
+// `#[cfg(feature = "mavros-oracle")]` then.
+#[cfg(any())]
 impl PackageSource for mavros_compiler::project::Project {
     fn file_manager(&self) -> &FileManager {
         self.file_manager()

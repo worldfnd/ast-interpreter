@@ -21,7 +21,7 @@ Crates that pass Noir AST values into this interpreter must use the same pinned 
 `acvm` sources. `acvm::FieldElement` is selected at compile time, so mismatched Noir revisions can create
 incompatible field types.
 
-Main exports: `interpret`, `interpret_with_inputs`, `Interpreter`, `Value`, `IntValue`, `DiffValue`,
+Main exports: `interpret`, `interpret_with_inputs`, `Value`, `IntValue`, `DiffValue`,
 `DiffOutcome`, `values_equivalent`, `outcomes_equivalent`, and `InterpretError`.
 
 ## Building and testing

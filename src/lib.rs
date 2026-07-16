@@ -1,10 +1,13 @@
 //! A tree-walking interpreter for Noir's monomorphized AST.
 //!
-//! It evaluates Noir's mono-AST directly, keeping integers as native `BigInt` values with explicit
-//! width and signedness. `Field` values use the compiled-in [`acvm::FieldElement`].
-//!
-//! Running the same source under bn254 and Goldilocks lets tests compare field-independent values
-//! such as integers, bools, arrays, tuples, and structs.
+//! Integers are kept as native `BigInt` values with explicit width and signedness; `Field` values
+//! use the compiled-in [`acvm::FieldElement`]. Running the same program under bn254 and Goldilocks
+//! then lets tests compare the field-independent results (integers, bools, arrays, tuples, structs).
+
+#[cfg(feature = "mavros-oracle")]
+compile_error!(
+    "the `mavros-oracle` feature needs the mavros-compiler dependency, blocked on the Mavros Goldilocks branch"
+);
 
 mod diff;
 mod error;
@@ -20,11 +23,13 @@ mod noir_oracle;
 mod tests;
 #[cfg(test)]
 mod validation_frontend;
-/// Property tests for field-independent value semantics.
 #[cfg(test)]
 mod value_proptest;
 
-pub use diff::{DiffOutcome, DiffValue, outcomes_equivalent, values_equivalent};
+pub use diff::{
+    CrossFieldDump, DUMP_FORMAT_VERSION, DiffOutcome, DiffValue, DumpProvenance, FailureKind,
+    failure_kind_of, outcome_is_tolerated, outcomes_equivalent, values_equivalent,
+};
 pub use error::InterpretError;
 pub use input::{expected_return_from_prover_toml, inputs_from_prover_toml};
 pub use value::{IntValue, Value};
@@ -36,15 +41,14 @@ use noirc_frontend::monomorphization::ast::{FuncId, Function, GlobalId, LocalId,
 /// Per-call-frame local environment: each `LocalId` is unique within a monomorphized function.
 type Frame = HashMap<LocalId, Value>;
 
-/// The result of evaluating an expression: a value, or a loop control signal that unwinds to
-/// the nearest enclosing loop.
+/// A value, or a loop-control signal that unwinds to the nearest enclosing loop.
 enum Flow {
     Normal(Value),
     Break,
     Continue,
 }
 
-pub struct Interpreter<'p> {
+pub(crate) struct Interpreter<'p> {
     program: &'p Program,
     globals: HashMap<GlobalId, Value>,
 }

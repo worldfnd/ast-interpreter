@@ -1,15 +1,17 @@
-//! Cross-field differential: compare the interpreter's result for the *same* program compiled
-//! under two different fields (bn254 vs Goldilocks).
-//!
-//! Each field build dumps outcomes to JSON, then a separate step compares them. Integers, bools,
-//! and structure must match; `Field` values may differ.
-//!
-//! The comparison logic is field-agnostic and can be tested without a full Goldilocks corpus run.
+//! Cross-field differential: compare the interpreter's result for the same program compiled under
+//! two fields (bn254 vs Goldilocks). Each build dumps its outcomes to JSON; a separate step diffs
+//! them. Integers, bools, and structure must match; `Field` values may differ. The comparison is
+//! field-agnostic, so it can be unit-tested without a full Goldilocks corpus run.
 
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
+use super::error::InterpretError;
 use super::value::Value;
+
+/// Bump whenever `DiffOutcome` or `DumpProvenance` changes shape, so a stale dump is rejected
+/// rather than silently misread.
+pub const DUMP_FORMAT_VERSION: u32 = 1;
 
 /// A field-independent encoding of an interpreter [`Value`] for cross-field comparison.
 ///
@@ -19,7 +21,11 @@ use super::value::Value;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffValue {
     Field,
-    Int { signed: bool, bits: u8, value: BigInt },
+    Int {
+        signed: bool,
+        bits: u8,
+        value: BigInt,
+    },
     Bool(bool),
     Unit,
     Str(String),
@@ -51,33 +57,126 @@ impl DiffValue {
     }
 }
 
-/// The outcome of interpreting one program under one field, ready to serialize and diff.
+/// Why a program failed to produce a value, discriminated so cross-field outcomes are compared by
+/// cause rather than lumped together. The stage kinds (`ProjectLoad`/`CompileError`/`InputError`)
+/// come from the harness; the rest project the [`InterpretError`] variants via [`failure_kind_of`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum DiffOutcome {
-    /// Interpreted to a value (the program's return).
-    Returned(DiffValue),
-    /// Did not reach interpretation, or interpretation errored (compile limit, unsupported
-    /// construct, assertion failure...). The string is the reason, for human triage.
-    Errored(String),
+pub enum FailureKind {
+    ProjectLoad,
+    CompileError,
+    InputError,
+    /// Normalized construct kind; reserved for tightening once Goldilocks stops being mostly
+    /// `Unsupported`.
+    Unsupported {
+        construct: String,
+    },
+    AssertionFailed,
+    Overflow,
+    DivisionByZero,
+    TypeError,
+    Internal,
+    /// The compiler or interpreter panicked; never equivalent to a non-panic outcome.
+    Panic,
 }
 
-/// Whether two cross-field outcomes for the same program are equivalent.
-///
-/// `Ok(())` means equivalent. `Err(reason)` describes the first divergence found — which, for two
-/// `Returned` outcomes, is an integer/structure mismatch (the corruption signal). Two `Errored`
-/// outcomes are treated as equivalent (both blocked, e.g. an unsupported construct on both sides);
-/// a `Returned` vs `Errored` split is a divergence worth surfacing.
+/// The outcome of interpreting one program under one field, ready to serialize and diff. `detail`
+/// on `Errored` is human-readable triage text only — it is never compared.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DiffOutcome {
+    Returned(DiffValue),
+    Errored { kind: FailureKind, detail: String },
+}
+
+/// Project an [`InterpretError`] onto its comparable [`FailureKind`]. The `String` payloads carry
+/// only triage detail, so they are dropped here; `Unsupported` keeps a normalized construct kind.
+pub fn failure_kind_of(error: &InterpretError) -> FailureKind {
+    match error {
+        InterpretError::AssertionFailed { .. } => FailureKind::AssertionFailed,
+        InterpretError::Overflow(_) => FailureKind::Overflow,
+        InterpretError::DivisionByZero => FailureKind::DivisionByZero,
+        InterpretError::Type(_) => FailureKind::TypeError,
+        InterpretError::Unsupported(msg) => FailureKind::Unsupported {
+            construct: normalize_construct(msg),
+        },
+        InterpretError::Internal(_) => FailureKind::Internal,
+    }
+}
+
+/// The construct kind is the head of an `Unsupported` message, before any name or detail.
+pub(crate) fn normalize_construct(msg: &str) -> String {
+    msg.split([':', '\''])
+        .next()
+        .unwrap_or(msg)
+        .trim()
+        .to_string()
+}
+
+/// Whether two cross-field outcomes for the same program are equivalent (`Ok(())`), or diverge
+/// (`Err(reason)`). Two `Returned` outcomes must agree on integers/structure; a crash on either
+/// side always surfaces; `Unsupported` on either side is tolerated (the Goldilocks side is mostly
+/// `Unsupported` until the stdlib port lands) but [`outcome_is_tolerated`] lets the caller count
+/// those so a coverage gap never reads as a pass. Any other kind mismatch is a divergence.
 pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), String> {
     match (a, b) {
         (DiffOutcome::Returned(x), DiffOutcome::Returned(y)) => values_equivalent(x, y),
-        (DiffOutcome::Errored(_), DiffOutcome::Errored(_)) => Ok(()),
-        (DiffOutcome::Returned(_), DiffOutcome::Errored(e)) => Err(format!(
-            "one field returned a value, the other errored: {e}"
+        (DiffOutcome::Returned(_), DiffOutcome::Errored { kind, detail }) => Err(format!(
+            "one field returned a value, the other errored ({kind:?}: {detail})"
         )),
-        (DiffOutcome::Errored(e), DiffOutcome::Returned(_)) => Err(format!(
-            "one field errored ({e}), the other returned a value"
+        (DiffOutcome::Errored { kind, detail }, DiffOutcome::Returned(_)) => Err(format!(
+            "one field errored ({kind:?}: {detail}), the other returned a value"
         )),
+        (DiffOutcome::Errored { kind: ka, .. }, DiffOutcome::Errored { kind: kb, .. }) => {
+            let panicked = |k: &FailureKind| matches!(k, FailureKind::Panic);
+            let unsupported = |k: &FailureKind| matches!(k, FailureKind::Unsupported { .. });
+            if panicked(ka) || panicked(kb) {
+                // A crash is never equivalent to anything else, tolerance notwithstanding.
+                if ka == kb {
+                    Ok(())
+                } else {
+                    Err(format!("crash on one side: {ka:?} vs {kb:?}"))
+                }
+            } else if unsupported(ka) || unsupported(kb) {
+                // TODO: compare the construct once Goldilocks stops being mostly-`Unsupported`.
+                Ok(())
+            } else if ka == kb {
+                Ok(())
+            } else {
+                Err(format!("both errored, but differently: {ka:?} vs {kb:?}"))
+            }
+        }
     }
+}
+
+/// Whether an outcome pair was let through only because `Unsupported` is tolerated (rather than a
+/// genuine agreement), so the caller can count it as a coverage gap.
+pub fn outcome_is_tolerated(a: &DiffOutcome, b: &DiffOutcome) -> bool {
+    matches!(
+        (a, b),
+        (DiffOutcome::Errored { kind: ka, .. }, DiffOutcome::Errored { kind: kb, .. })
+            if (matches!(ka, FailureKind::Unsupported { .. }) || matches!(kb, FailureKind::Unsupported { .. }))
+                && !matches!(ka, FailureKind::Panic) && !matches!(kb, FailureKind::Panic)
+    )
+}
+
+/// A dump's provenance, stamped when it is written so two dumps from mismatched builds are rejected
+/// rather than diffed into phantom divergences. `built_at` is triage only and never compared.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DumpProvenance {
+    pub format_version: u32,
+    pub field: String,
+    pub field_modulus: String,
+    pub noir_rev: String,
+    pub interpreter_rev: String,
+    pub corpus_dir: String,
+    pub program_count: usize,
+    pub built_at: String,
+}
+
+/// One field's corpus outcomes plus the provenance needed to trust a cross-field diff of them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrossFieldDump {
+    pub provenance: DumpProvenance,
+    pub outcomes: Vec<(String, DiffOutcome)>,
 }
 
 /// Whether two values are cross-field equivalent: integers/bools/structure must match exactly,
@@ -193,12 +292,53 @@ mod tests {
         assert!(values_equivalent(&int("0"), &DiffValue::Bool(false)).is_err());
     }
 
+    fn errored(kind: FailureKind) -> DiffOutcome {
+        DiffOutcome::Errored {
+            kind,
+            detail: String::new(),
+        }
+    }
+
     #[test]
     fn returned_vs_errored_diverges() {
         let a = DiffOutcome::Returned(int("1"));
-        let b = DiffOutcome::Errored("unsupported".to_string());
+        let b = errored(FailureKind::Unsupported {
+            construct: "reference".to_string(),
+        });
         assert!(outcomes_equivalent(&a, &b).is_err());
-        // Two errors are equivalent (both blocked the same way).
-        assert!(outcomes_equivalent(&b.clone(), &b).is_ok());
+    }
+
+    #[test]
+    fn same_kind_errors_are_equivalent() {
+        let a = errored(FailureKind::CompileError);
+        assert!(outcomes_equivalent(&a, &a).is_ok());
+    }
+
+    #[test]
+    fn unsupported_is_tolerated_and_counted() {
+        let u = errored(FailureKind::Unsupported {
+            construct: "intrinsic".to_string(),
+        });
+        let c = errored(FailureKind::CompileError);
+        assert!(outcomes_equivalent(&u, &c).is_ok());
+        assert!(outcome_is_tolerated(&u, &c));
+    }
+
+    #[test]
+    fn panic_is_never_tolerated() {
+        // A crash surfaces even against a tolerated `Unsupported`.
+        let p = errored(FailureKind::Panic);
+        let u = errored(FailureKind::Unsupported {
+            construct: "intrinsic".to_string(),
+        });
+        assert!(outcomes_equivalent(&p, &u).is_err());
+        assert!(!outcome_is_tolerated(&p, &u));
+    }
+
+    #[test]
+    fn differing_real_kinds_diverge() {
+        let a = errored(FailureKind::Overflow);
+        let b = errored(FailureKind::AssertionFailed);
+        assert!(outcomes_equivalent(&a, &b).is_err());
     }
 }
