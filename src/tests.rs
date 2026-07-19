@@ -386,6 +386,14 @@ fn interprets_hint_intrinsics() {
     assert_eq!(result, Value::Unit, "main returns unit");
 }
 
+/// Structural `==`/`!=` on arrays, tuples, and a `derive(Eq)` struct runs via the `Eq::eq` call path.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_aggregate_equality() {
+    let result = interpret_fixture("interp_aggregate_eq").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
 /// `x.assert_max_bit_size::<48>()` (the `apply_range_constraint` builtin) holds for `x = 3`. Gated
 /// off under goldilocks: `assert_max_bit_size` lives in `std/field/mod.nr`, not yet elaborated there.
 #[cfg(not(feature = "goldilocks"))]
@@ -416,6 +424,38 @@ fn interprets_conversion_intrinsics() {
 fn interprets_decomposition_intrinsics() {
     let result = interpret_fixture("intrinsic_to_bytes").expect("interpretation should succeed");
     assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// A failing assertion's fmt-string message is rendered for a field-independent value (`sum: u32`).
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn renders_field_independent_assert_message() {
+    let project = NoirProject::new(negative_fixture("assert_fmt_msg")).expect("project");
+    let validated = compile_for_validation(&project).expect("frontend compile");
+    match interpret(&validated.program) {
+        Err(InterpretError::AssertionFailed {
+            message: Some(m), ..
+        }) => assert!(m.contains("sum was 45"), "message not rendered: {m:?}"),
+        other => panic!("expected AssertionFailed with a rendered message, got {other:?}"),
+    }
+}
+
+/// An assert message is rendered even when it interpolates a `Field` — it's triage text, never compared.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn renders_field_interpolating_assert_message() {
+    let root = negative_fixture("assert_fmt_field_msg");
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project).expect("frontend compile");
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
+    match interpret_with_inputs(&validated.program, inputs) {
+        Err(InterpretError::AssertionFailed {
+            message: Some(m), ..
+        }) => assert!(m.contains("x was 3"), "field message not rendered: {m:?}"),
+        other => panic!("expected AssertionFailed with a rendered message, got {other:?}"),
+    }
 }
 #[cfg(not(feature = "goldilocks"))]
 #[test]

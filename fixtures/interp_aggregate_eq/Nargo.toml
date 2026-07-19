@@ -1,0 +1,6 @@
+[package]
+name = "interp_aggregate_eq"
+type = "bin"
+authors = [""]
+
+[dependencies]

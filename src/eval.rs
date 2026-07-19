@@ -379,8 +379,15 @@ impl<'p> Interpreter<'p> {
                 let value = self.eval_expr_value(element, env)?;
                 Value::Array(vec![value; *length as usize])
             }
-            Literal::FmtStr(..) => {
-                return Err(InterpretError::Unsupported("format string".to_string()));
+            Literal::FmtStr(fragments, _count, captures) => {
+                // Decline a `Field` interpolation: it renders field-specifically, breaking the diff.
+                let values = self.eval_fmt_captures(captures, env)?;
+                if values.iter().any(contains_field) {
+                    return Err(InterpretError::Unsupported(
+                        "format string interpolating a field".to_string(),
+                    ));
+                }
+                Value::Str(format_fmt_str(fragments, &values)?)
             }
         };
         Ok(value)
@@ -484,13 +491,19 @@ impl<'p> Interpreter<'p> {
                     "operator {op:?} not defined on bool"
                 ))),
             },
+            // Aggregate `==`/`Ord` lower to an `Eq::eq` call, never a primitive Binary, so a
+            // matching-shape pair here is a coverage gap — tolerate it. Ill-typed pairs stay loud.
+            (lhs, rhs) if same_aggregate_shape(&lhs, &rhs) => Err(InterpretError::Unsupported(
+                format!("binary {op:?} on aggregate operands (should lower to a trait-impl call)"),
+            )),
             (lhs, rhs) => Err(InterpretError::Type(format!(
                 "binary operator {op:?} on mismatched operands {lhs:?}, {rhs:?}"
             ))),
         }
     }
 
-    fn eval_cast(&self, value: Value, target: &Type) -> Result<Value, InterpretError> {
+    // `pub(crate)` so the `unsafe_cast` intrinsic can reuse the Field->int truncation.
+    pub(crate) fn eval_cast(&self, value: Value, target: &Type) -> Result<Value, InterpretError> {
         match target {
             Type::Field => match value {
                 // Noir rejects signed-to-Field casts at type-check (`UnsupportedFieldCast`);
@@ -540,13 +553,35 @@ impl<'p> Interpreter<'p> {
         }
     }
 
+    /// Render an assertion's failure message. A format string is rendered even when it interpolates
+    /// a `Field` — the message is triage text, never compared.
     fn render_assert_message(&mut self, expr: &'p Expression, env: &mut Frame) -> Option<String> {
+        if let Expression::Literal(Literal::FmtStr(fragments, _count, captures)) = expr {
+            let values = self.eval_fmt_captures(captures, env).ok()?;
+            return format_fmt_str(fragments, &values).ok();
+        }
         match self.eval_expr_value(expr, env) {
             Ok(Value::Str(s)) => Some(s),
             _ => None,
         }
     }
 
+    /// Evaluate a format string's captures (the monomorphizer packs them into one tuple).
+    fn eval_fmt_captures(
+        &mut self,
+        captures: &'p Expression,
+        env: &mut Frame,
+    ) -> Result<Vec<Value>, InterpretError> {
+        match self.eval_expr_value(captures, env)? {
+            Value::Tuple(cells) => Ok(cells
+                .iter()
+                .map(|c| c.borrow().clone().deep_copy())
+                .collect()),
+            other => Err(InterpretError::Internal(format!(
+                "fmt captures were not a tuple: {other:?}"
+            ))),
+        }
+    }
 
     /// Evaluate `expr` in place position: return a `Ref(cell, true)` when it denotes a shareable
     /// cell (a mutable slot or a tuple field), so `&`/`&mut` can alias it.
@@ -805,6 +840,77 @@ fn store_flattened(target: &Rc<RefCell<Value>>, rhs: Value) {
     };
     if !recursed {
         *target.borrow_mut() = rhs;
+    }
+}
+
+/// Whether two values are aggregates of the same kind (the shapes that lower to an `Eq`/`Ord` call).
+fn same_aggregate_shape(a: &Value, b: &Value) -> bool {
+    matches!(
+        (a, b),
+        (Value::Array(_), Value::Array(_))
+            | (Value::Tuple(_), Value::Tuple(_))
+            | (Value::Str(_), Value::Str(_))
+            | (Value::Unit, Value::Unit)
+    )
+}
+
+/// Render a format string by interleaving its literal fragments with the rendered capture values.
+fn format_fmt_str(
+    fragments: &[FmtStrFragment],
+    values: &[Value],
+) -> Result<String, InterpretError> {
+    let mut out = String::new();
+    let mut next = values.iter();
+    for fragment in fragments {
+        match fragment {
+            FmtStrFragment::String(s) => out.push_str(s),
+            FmtStrFragment::Interpolation(..) => {
+                let value = next.next().ok_or_else(|| {
+                    InterpretError::Internal(
+                        "fmt-string has more interpolations than captures".to_string(),
+                    )
+                })?;
+                out.push_str(&format_value(value));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Render a value for a format string. A `Field` renders field-specifically, so it is only reached
+/// from an assertion message (which is never compared).
+fn format_value(value: &Value) -> String {
+    match value {
+        Value::Int(i) => i.value.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Str(s) => s.clone(),
+        Value::Unit => "()".to_string(),
+        Value::Field(f) => field_to_bigint(f).to_string(),
+        Value::Array(xs) => format!(
+            "[{}]",
+            xs.iter().map(format_value).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Tuple(cells) => format!(
+            "({})",
+            cells
+                .iter()
+                .map(|c| format_value(&c.borrow()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Function(_) => "<function>".to_string(),
+        Value::Ref(cell, _) => format_value(&cell.borrow()),
+    }
+}
+
+/// Whether a value contains a `Field` anywhere (which would make a materialized `FmtStr` field-specific).
+fn contains_field(value: &Value) -> bool {
+    match value {
+        Value::Field(_) => true,
+        Value::Array(xs) => xs.iter().any(contains_field),
+        Value::Tuple(cells) => cells.iter().any(|c| contains_field(&c.borrow())),
+        Value::Ref(cell, _) => contains_field(&cell.borrow()),
+        _ => false,
     }
 }
 
@@ -1168,5 +1274,63 @@ mod semantics_tests {
             eval(BinaryOpKind::Subtract, int(false, 8, 0), int(false, 8, 1)),
             Err(InterpretError::Overflow(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod aggregate_and_fmt_tests {
+    use super::*;
+    use acvm::FieldElement;
+
+    fn i32v(n: i128) -> Value {
+        Value::Int(IntValue::canonical(true, 32, BigInt::from(n)))
+    }
+
+    #[test]
+    fn aggregate_shape_matches_only_same_kind() {
+        assert!(same_aggregate_shape(
+            &Value::Array(vec![]),
+            &Value::Array(vec![])
+        ));
+        assert!(same_aggregate_shape(
+            &Value::tuple(vec![]),
+            &Value::tuple(vec![])
+        ));
+        assert!(same_aggregate_shape(
+            &Value::Str("a".into()),
+            &Value::Str("b".into())
+        ));
+        // Scalars and cross-kind pairs are not aggregate-shaped, so they stay a loud Type error.
+        assert!(!same_aggregate_shape(&i32v(1), &i32v(2)));
+        assert!(!same_aggregate_shape(
+            &Value::Array(vec![]),
+            &Value::tuple(vec![])
+        ));
+    }
+
+    #[test]
+    fn format_value_renders_scalars_field_independently() {
+        assert_eq!(format_value(&i32v(-7)), "-7");
+        assert_eq!(format_value(&Value::Bool(true)), "true");
+        assert_eq!(
+            format_value(&Value::Array(vec![i32v(1), i32v(2)])),
+            "[1, 2]"
+        );
+        assert_eq!(
+            format_value(&Value::tuple(vec![i32v(1), Value::Bool(false)])),
+            "(1, false)"
+        );
+    }
+
+    #[test]
+    fn contains_field_detects_a_nested_field() {
+        let f = Value::Field(FieldElement::from(3u128));
+        assert!(contains_field(&f));
+        assert!(contains_field(&Value::tuple(vec![i32v(1), f.clone()])));
+        assert!(contains_field(&Value::Array(vec![f])));
+        assert!(!contains_field(&Value::tuple(vec![
+            i32v(1),
+            Value::Bool(true)
+        ])));
     }
 }
