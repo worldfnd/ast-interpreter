@@ -1,0 +1,6 @@
+[package]
+name = "interp_refs_double_deref_alias"
+type = "bin"
+authors = [""]
+
+[dependencies]

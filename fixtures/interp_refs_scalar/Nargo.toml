@@ -1,0 +1,6 @@
+[package]
+name = "interp_refs_scalar"
+type = "bin"
+authors = [""]
+
+[dependencies]

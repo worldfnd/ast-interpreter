@@ -1,21 +1,26 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use acvm::{AcirField, FieldElement};
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
 
 use noirc_errors::Location;
 use noirc_frontend::ast::{BinaryOpKind, UnaryOp};
+use noirc_frontend::hir_def::expr::Constructor;
 use noirc_frontend::monomorphization::ast::{
-    Definition, Expression, GlobalId, LValue, Literal, Type,
+    Definition, Expression, GlobalId, LValue, Literal, MatchCase, Type,
 };
+use noirc_frontend::token::FmtStrFragment;
 
 use super::error::InterpretError;
 use super::value::{IntValue, Value, field_to_bigint};
 use super::{Flow, Frame, GlobalState, Interpreter};
 
-#[derive(Debug)]
-enum Step {
-    Index(usize, Location),
-    Field(usize),
+/// The resolved target of a call: a user function, or a builtin/foreign intrinsic dispatched by name.
+enum Callee<'p> {
+    Function(noirc_frontend::monomorphization::ast::FuncId),
+    Intrinsic(&'p str),
 }
 
 fn index_out_of_bounds(location: Location, index: usize, len: usize) -> InterpretError {
@@ -36,7 +41,8 @@ impl<'p> Interpreter<'p> {
     ) -> Result<Value, InterpretError> {
         match self.eval(expr, env)? {
             Flow::Normal(value) => Ok(value),
-            Flow::Break | Flow::Continue => Err(InterpretError::Internal(
+            // e.g. `let x = loop { break v };` — not modeled, so tolerate rather than false-reject.
+            Flow::Break | Flow::Continue => Err(InterpretError::Unsupported(
                 "break/continue in value position".to_string(),
             )),
         }
@@ -49,9 +55,16 @@ impl<'p> Interpreter<'p> {
     ) -> Result<Flow, InterpretError> {
         let value = match expr {
             Expression::Ident(ident) => match &ident.definition {
-                Definition::Local(local) => env.get(local).cloned().ok_or_else(|| {
-                    InterpretError::Internal(format!("unbound local '{}'", ident.name))
-                })?,
+                Definition::Local(local) => {
+                    let value = env.get(local).cloned().ok_or_else(|| {
+                        InterpretError::Internal(format!("unbound local '{}'", ident.name))
+                    })?;
+                    match value {
+                        // Load a mutable slot; both arms `deep_copy` so a read never aliases.
+                        Value::Ref(cell, true) => cell.borrow().clone().deep_copy(),
+                        other => other.deep_copy(),
+                    }
+                }
                 Definition::Global(global) => self.eval_global(*global)?,
                 Definition::Function(id) => Value::Function(*id),
                 Definition::Builtin(name)
@@ -76,13 +89,24 @@ impl<'p> Interpreter<'p> {
                 last
             }
 
-            Expression::Unary(unary) => {
-                if unary.skip {
-                    return self.eval(&unary.rhs, env);
+            Expression::Unary(unary) => match &unary.operator {
+                // `&`/`&mut`: reuse a slot's cell to alias it, else box the value in a fresh cell.
+                // The `skip` flag (set for `&mut a.b.c` taken through a reference field, where
+                // member access is elaborated as an offset that already denotes the reference)
+                // doesn't change this: `eval_place` peels to the live cell either way, while
+                // evaluating the rhs as a value would drop the reference.
+                UnaryOp::Reference { .. } => match self.eval_place(&unary.rhs, env)? {
+                    Value::Ref(cell, true) => Value::Ref(cell, false),
+                    other => Value::Ref(Rc::new(RefCell::new(other)), false),
+                },
+                // A skipped deref (or other op) returns the operand unchanged.
+                _ if unary.skip => return self.eval(&unary.rhs, env),
+                UnaryOp::Dereference { .. } => self.eval_expr_value(&unary.rhs, env)?.deref()?,
+                _ => {
+                    let rhs = self.eval_expr_value(&unary.rhs, env)?;
+                    self.eval_unary(&unary.operator, rhs)?
                 }
-                let rhs = self.eval_expr_value(&unary.rhs, env)?;
-                self.eval_unary(&unary.operator, rhs)?
-            }
+            },
 
             Expression::Binary(binary) => {
                 let lhs = self.eval_expr_value(&binary.lhs, env)?;
@@ -219,7 +243,7 @@ impl<'p> Interpreter<'p> {
 
             Expression::Assign(assign) => {
                 let value = self.eval_expr_value(&assign.expression, env)?;
-                self.assign_lvalue(&assign.lvalue, value, env)?;
+                self.store(&assign.lvalue, value, env)?;
                 Value::Unit
             }
 
@@ -301,11 +325,10 @@ impl<'p> Interpreter<'p> {
             },
             Literal::Bool(b) => Value::Bool(*b),
             Literal::Unit => Value::Unit,
-            // beta.22: `Str` carries the raw UTF-8 bytes (previously a `String`).
-            Literal::Str(s) => Value::Str(
-                String::from_utf8(s.clone())
-                    .map_err(|e| InterpretError::Type(format!("non-UTF-8 string literal: {e}")))?,
-            ),
+            // Noir strings may be non-UTF-8; ours is a Rust `String`, so tolerate that case.
+            Literal::Str(s) => Value::Str(String::from_utf8(s.clone()).map_err(|e| {
+                InterpretError::Unsupported(format!("non-UTF-8 string literal: {e}"))
+            })?),
             Literal::Array(array) | Literal::Vector(array) => {
                 let mut elements = Vec::with_capacity(array.contents.len());
                 for element in &array.contents {
@@ -378,12 +401,10 @@ impl<'p> Interpreter<'p> {
                     "cannot apply `!` to {other:?}"
                 ))),
             },
-            UnaryOp::Reference { .. } => Err(InterpretError::Unsupported(
-                "reference (`&`/`&mut`)".to_string(),
-            )),
-            UnaryOp::Dereference { .. } => {
-                Err(InterpretError::Unsupported("dereference (`*`)".to_string()))
-            }
+            // Reference/Dereference need the operand expression, so `eval` handles them directly.
+            UnaryOp::Reference { .. } | UnaryOp::Dereference { .. } => Err(
+                InterpretError::Internal("reference/dereference reached eval_unary".to_string()),
+            ),
         }
     }
 
@@ -483,7 +504,6 @@ impl<'p> Interpreter<'p> {
         }
     }
 
-    /// Best-effort rendering of an assertion's failure message (only static strings for now).
     fn render_assert_message(&mut self, expr: &'p Expression, env: &mut Frame) -> Option<String> {
         match self.eval_expr_value(expr, env) {
             Ok(Value::Str(s)) => Some(s),
@@ -491,116 +511,264 @@ impl<'p> Interpreter<'p> {
         }
     }
 
-    fn assign_lvalue(
+
+    /// Evaluate `expr` in place position: return a `Ref(cell, true)` when it denotes a shareable
+    /// cell (a mutable slot or a tuple field), so `&`/`&mut` can alias it.
+    fn eval_place(
         &mut self,
-        lvalue: &'p LValue,
-        new: Value,
+        expr: &'p Expression,
         env: &mut Frame,
-    ) -> Result<(), InterpretError> {
-        let (root, path) = self.lvalue_path(lvalue, env)?;
-        let current = env
-            .get(&root)
-            .cloned()
-            .ok_or_else(|| InterpretError::Internal("assignment to unbound local".to_string()))?;
-        let updated = update_path(current, &path, new)?;
-        env.insert(root, updated);
-        Ok(())
+    ) -> Result<Value, InterpretError> {
+        match expr {
+            Expression::Ident(ident) => match &ident.definition {
+                Definition::Local(local) => env.get(local).cloned().ok_or_else(|| {
+                    InterpretError::Internal(format!("unbound local '{}'", ident.name))
+                }),
+                // A global/function/intrinsic has no place; the caller boxes the value in a cell.
+                _ => self.eval_expr_value(expr, env),
+            },
+            Expression::ExtractTupleField(inner, i) => {
+                // Peel through any depth of references to the live tuple cells (the same helper the
+                // write side uses), so `&mut pp.field` through a `&mut &mut S` aliases the real
+                // cell rather than a one-level snapshot.
+                let cells = tuple_cells_of(self.eval_place(inner, env)?)?;
+                let cell = cells.get(*i).cloned().ok_or_else(|| {
+                    InterpretError::Type(format!("tuple field {i} out of bounds"))
+                })?;
+                Ok(Value::Ref(cell, true))
+            }
+            // `&mut arr[i]` is rejected by Noir's own compiler on the pinned branch, so it never
+            // reaches the interpreter; this stays only as a defensive guard.
+            Expression::Index(_) => Err(InterpretError::Unsupported(
+                "reference to an array element".to_string(),
+            )),
+            // `&(non-place expr)`: the `Reference` arm boxes the value in a fresh cell.
+            _ => self.eval_expr_value(expr, env),
+        }
     }
 
-    fn lvalue_path(
+    /// Assign `rhs` to `lvalue` by resolving it to a target cell and storing through it, so live
+    /// field references see the write. Array elements aren't cells, so those update in place.
+    fn store(
+        &mut self,
+        lvalue: &'p LValue,
+        rhs: Value,
+        env: &mut Frame,
+    ) -> Result<(), InterpretError> {
+        match lvalue {
+            LValue::Clone(inner) => self.store(inner, rhs, env),
+            LValue::Index { .. } => {
+                let (array_cell, indices) = self.resolve_array_target(lvalue, env)?;
+                let mut array = array_cell.borrow_mut();
+                let mut slot: &mut Value = &mut array;
+                for (index, location) in indices {
+                    let Value::Array(elements) = slot else {
+                        return Err(InterpretError::Type(
+                            "indexed assignment to a non-array".to_string(),
+                        ));
+                    };
+                    let len = elements.len();
+                    slot = elements
+                        .get_mut(index)
+                        .ok_or_else(|| index_out_of_bounds(location, index, len))?;
+                }
+                *slot = rhs;
+                Ok(())
+            }
+            _ => {
+                let cell = self.lvalue_target_cell(lvalue, env)?;
+                store_flattened(&cell, rhs);
+                Ok(())
+            }
+        }
+    }
+
+    /// The cell to store an assignment through, for every lvalue whose leaf is a cell (an
+    /// `Ident`/`MemberAccess`/`Dereference`). Array-element leaves are handled in [`Self::store`].
+    fn lvalue_target_cell(
         &mut self,
         lvalue: &'p LValue,
         env: &mut Frame,
-    ) -> Result<(noirc_frontend::monomorphization::ast::LocalId, Vec<Step>), InterpretError> {
+    ) -> Result<Rc<RefCell<Value>>, InterpretError> {
         match lvalue {
             LValue::Ident(ident) => match &ident.definition {
-                Definition::Local(local) => Ok((*local, Vec::new())),
+                Definition::Local(local) => {
+                    let value = env.get(local).cloned().ok_or_else(|| {
+                        InterpretError::Internal("assignment to unbound local".to_string())
+                    })?;
+                    match value {
+                        Value::Ref(cell, _) => Ok(cell),
+                        // A real constrained-`main` assignment target is always a mutable slot.
+                        _ => Err(InterpretError::Internal(
+                            "assignment to a non-mutable local".to_string(),
+                        )),
+                    }
+                }
                 _ => Err(InterpretError::Unsupported(
                     "assignment to a non-local binding".to_string(),
                 )),
             },
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => {
+                let cells = tuple_cells_of(self.lvalue_value(object, env)?)?;
+                cells.get(*field_index).cloned().ok_or_else(|| {
+                    InterpretError::Type(format!("assignment field {field_index} out of bounds"))
+                })
+            }
+            LValue::Dereference { reference, .. } => match self.lvalue_value(reference, env)? {
+                Value::Ref(cell, _) => Ok(cell),
+                // The reference model didn't produce a cell for this shape — tolerate it.
+                other => Err(InterpretError::Unsupported(format!(
+                    "assignment through a dereference of a non-reference ({other:?})"
+                ))),
+            },
+            LValue::Clone(inner) => self.lvalue_target_cell(inner, env),
+            // Reached only for an unusual array-element-as-object shape not yet modeled; tolerate it.
+            LValue::Index { .. } => Err(InterpretError::Unsupported(
+                "assignment through an array-element place".to_string(),
+            )),
+        }
+    }
+
+    /// The current value an lvalue denotes (auto-dereferencing a mutable slot). Returned tuples and
+    /// arrays share their cells with the binding, so the caller can reach a live field/element cell.
+    fn lvalue_value(
+        &mut self,
+        lvalue: &'p LValue,
+        env: &mut Frame,
+    ) -> Result<Value, InterpretError> {
+        match lvalue {
+            LValue::Ident(ident) => match &ident.definition {
+                Definition::Local(local) => {
+                    let value = env.get(local).cloned().ok_or_else(|| {
+                        InterpretError::Internal(format!(
+                            "unbound local '{}' in lvalue",
+                            ident.name
+                        ))
+                    })?;
+                    match value {
+                        Value::Ref(cell, true) => Ok(cell.borrow().clone()),
+                        other => Ok(other),
+                    }
+                }
+                _ => Err(InterpretError::Unsupported(
+                    "assignment to a non-local binding".to_string(),
+                )),
+            },
+            LValue::MemberAccess {
+                object,
+                field_index,
+            } => {
+                let cells = tuple_cells_of(self.lvalue_value(object, env)?)?;
+                cells
+                    .get(*field_index)
+                    .map(|c| c.borrow().clone())
+                    .ok_or_else(|| {
+                        InterpretError::Type(format!("field {field_index} out of bounds in lvalue"))
+                    })
+            }
+            LValue::Index { array, index, .. } => {
+                let i = self.eval_expr_value(index, env)?.as_index()?;
+                match self.lvalue_value(array, env)? {
+                    Value::Array(elements) => elements.get(i).cloned().ok_or_else(|| {
+                        InterpretError::Type(format!(
+                            "index {i} out of bounds (len {}) in lvalue",
+                            elements.len()
+                        ))
+                    }),
+                    other => Err(InterpretError::Type(format!(
+                        "cannot index {other:?} in lvalue"
+                    ))),
+                }
+            }
+            // Share the referent's cells (shallow) so a nested field target stays live.
+            LValue::Dereference { reference, .. } => match self.lvalue_value(reference, env)? {
+                Value::Ref(cell, _) => Ok(cell.borrow().clone()),
+                other => Err(InterpretError::Unsupported(format!(
+                    "dereference of a non-reference value in lvalue ({other:?})"
+                ))),
+            },
+            LValue::Clone(inner) => self.lvalue_value(inner, env),
+        }
+    }
+
+    /// Resolve an `Index` lvalue chain to the cell holding the outermost array plus the indices into
+    /// it, so a nested `arr[i][j]` update can descend the array in place.
+    fn resolve_array_target(
+        &mut self,
+        lvalue: &'p LValue,
+        env: &mut Frame,
+    ) -> Result<(Rc<RefCell<Value>>, Vec<(usize, Location)>), InterpretError> {
+        match lvalue {
             LValue::Index {
                 array,
                 index,
                 location,
                 ..
             } => {
-                let (root, mut path) = self.lvalue_path(array, env)?;
-                let i = self.eval_expr_value(index, env)?.as_index()?;
-                let root_value = env.get(&root).ok_or_else(|| {
-                    InterpretError::Internal("assignment to unbound local".to_string())
-                })?;
-                match value_at(root_value, &path)? {
-                    Value::Array(elements) if i < elements.len() => {}
-                    Value::Array(elements) => {
-                        return Err(index_out_of_bounds(*location, i, elements.len()));
-                    }
-                    other => {
-                        return Err(InterpretError::Type(format!("cannot index {other:?}")));
-                    }
-                }
-                path.push(Step::Index(i, *location));
-                Ok((root, path))
+                // The ownership pass wraps the inner array in `Clone`; peel it before recursing.
+                let array = strip_clone(array);
+                // Noir resolves the array place before evaluating the index expression.
+                let (cell, mut indices) = if matches!(array, LValue::Index { .. }) {
+                    self.resolve_array_target(array, env)?
+                } else {
+                    (self.lvalue_target_cell(array, env)?, Vec::new())
+                };
+                indices.push((self.eval_expr_value(index, env)?.as_index()?, *location));
+                Ok((cell, indices))
             }
-            LValue::MemberAccess {
-                object,
-                field_index,
-            } => {
-                let (root, mut path) = self.lvalue_path(object, env)?;
-                path.push(Step::Field(*field_index));
-                Ok((root, path))
-            }
-            LValue::Clone(inner) => self.lvalue_path(inner, env),
-            LValue::Dereference { .. } => Err(InterpretError::Unsupported(
-                "assignment through a dereference".to_string(),
+            LValue::Clone(inner) => self.resolve_array_target(inner, env),
+            _ => Err(InterpretError::Internal(
+                "resolve_array_target on a non-index lvalue".to_string(),
             )),
         }
     }
 }
 
-/// Resolve a checked lvalue prefix; failure indicates an interpreter invariant violation.
-fn value_at<'v>(root: &'v Value, path: &[Step]) -> Result<&'v Value, InterpretError> {
-    let mut value = root;
-    for step in path {
-        value = match (step, value) {
-            (Step::Index(i, _), Value::Array(elements)) => elements.get(*i),
-            (Step::Field(i), Value::Tuple(elements)) => elements.get(*i),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            InterpretError::Internal(format!("lvalue path step {step:?} left the value shape"))
-        })?;
+/// Peel any `Clone` wrappers off an lvalue, returning the underlying place.
+fn strip_clone(lvalue: &LValue) -> &LValue {
+    let mut current = lvalue;
+    while let LValue::Clone(inner) = current {
+        current = inner;
     }
-    Ok(value)
+    current
 }
 
-/// Functionally update a nested value at `path`, returning the new root value.
-fn update_path(value: Value, path: &[Step], new: Value) -> Result<Value, InterpretError> {
-    let Some((step, rest)) = path.split_first() else {
-        return Ok(new);
-    };
-    match (step, value) {
-        (Step::Index(i, location), Value::Array(mut elements)) => {
-            if *i >= elements.len() {
-                return Err(index_out_of_bounds(*location, *i, elements.len()));
-            }
-            let child = std::mem::replace(&mut elements[*i], Value::Unit);
-            elements[*i] = update_path(child, rest, new)?;
-            Ok(Value::Array(elements))
-        }
-        (Step::Field(i), Value::Tuple(mut elements)) => {
-            if *i >= elements.len() {
-                return Err(InterpretError::Type(format!(
-                    "assignment field {i} out of bounds"
-                )));
-            }
-            let child = std::mem::replace(&mut elements[*i], Value::Unit);
-            elements[*i] = update_path(child, rest, new)?;
-            Ok(Value::Tuple(elements))
-        }
-        (_, other) => Err(InterpretError::Type(format!(
-            "lvalue path does not match value shape: {other:?}"
+/// A tuple's shared cells, peeling through any depth of references. The shared peel primitive for
+/// both the write side (`MemberAccess` assign) and the ref-take side (`eval_place`), so field
+/// access reaches the live cell at any nesting. Any other shape is a reference pattern we don't
+/// model, so tolerate it.
+fn tuple_cells_of(value: Value) -> Result<Vec<Rc<RefCell<Value>>>, InterpretError> {
+    match value {
+        Value::Tuple(cells) => Ok(cells),
+        Value::Ref(cell, _) => tuple_cells_of(cell.borrow().clone()),
+        other => Err(InterpretError::Unsupported(format!(
+            "field access on a non-tuple value ({other:?})"
         ))),
+    }
+}
+
+/// Write `rhs` into `target`. When both are tuples, write through the target's existing field cells
+/// rather than replacing them, so live `&mut field` references keep pointing at the new value.
+fn store_flattened(target: &Rc<RefCell<Value>>, rhs: Value) {
+    let recursed = {
+        let borrowed = target.borrow();
+        match (&*borrowed, &rhs) {
+            (Value::Tuple(target_cells), Value::Tuple(rhs_cells))
+                if target_cells.len() == rhs_cells.len() =>
+            {
+                for (t, r) in target_cells.iter().zip(rhs_cells) {
+                    store_flattened(t, r.borrow().clone());
+                }
+                true
+            }
+            _ => false,
+        }
+    };
+    if !recursed {
+        *target.borrow_mut() = rhs;
     }
 }
 

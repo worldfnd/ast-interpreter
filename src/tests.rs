@@ -264,9 +264,62 @@ fn interprets_mixed_inputs() {
     );
 }
 
-/// A program whose `main` takes inputs interprets correctly when those inputs are supplied from
-/// `Prover.toml`. `assert_statement` is `main(x: Field, y: pub Field)` with `x == y == 3`, so a
-/// clean `Unit` proves the input bridge feeds the right values.
+/// A `&mut` parameter mutates a caller local through a call, and a local `&mut` writes through a deref.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_scalar_references() {
+    let result = interpret_fixture("interp_refs_scalar").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// `&mut s.field` aliases one field cell (sibling untouched), and a field ref taken before a
+/// whole-struct reassignment still observes the new value.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_struct_field_references() {
+    let result =
+        interpret_fixture("interp_refs_struct_field").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// A `&mut` threaded through `main -> twice -> bump` mutates one shared cell: `100 + 5 + 5 == 110`.
+#[test]
+fn interprets_reference_call_chain() {
+    let root = fixture("interp_refs_call_chain");
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project).expect("frontend");
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
+    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    assert_eq!(
+        result,
+        Value::Int(IntValue {
+            signed: false,
+            bits: 64,
+            value: BigInt::from(110)
+        })
+    );
+}
+
+/// `&mut holder.inner_ref.v` peels through a ref-typed field to the live cell, so the write aliases
+/// the original `inner` (sibling untouched) — the multi-layer place peel + the `skip` case.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_reference_through_struct_field() {
+    let result =
+        interpret_fixture("interp_refs_nested_field").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// Two copies of the same inner `&mut` alias, and a `&mut &mut` in a struct field derefs twice to its cell.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_multi_level_reference_aliasing() {
+    let result =
+        interpret_fixture("interp_refs_double_deref_alias").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn interprets_program_with_inputs() {
