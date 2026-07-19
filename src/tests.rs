@@ -56,8 +56,7 @@ fn interprets_basic_corpus_program() {
     assert_eq!(result, Value::Unit, "main returns unit");
 }
 
-/// The oracle must bite: a program whose computed (non-const-folded) assertion is false interprets
-/// to `AssertionFailed`, not a clean pass — without this the passing case above would be hollow.
+/// A false (non-const-folded) assertion interprets to `AssertionFailed`, not a clean pass.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn detects_false_assertion() {
@@ -69,11 +68,8 @@ fn detects_false_assertion() {
     }
 }
 
-/// The validation frontend tolerates elaboration errors only in code `main` does not reach; a type
-/// error in the *reachable* set must still be rejected, or the oracle would validate a
-/// silently-miscompiled AST. The fixture binds a `u64` to a `bool` in `main`'s own body, so the
-/// error is unambiguously reachable. A clean `Ok(())` is the hole we guard against; a monomorphizer
-/// panic on the elaborator's `Error` node is also a rejection, so both count as a pass.
+/// A type error in code `main` *reaches* must be rejected, not silently monomorphized. A clean
+/// `Ok(())` is the hole we guard against; a monomorphizer panic on the `Error` node also counts.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn rejects_reachable_type_error() {
@@ -128,9 +124,7 @@ fn interprets_reached_dep_fixture_on_bn254() {
     assert_eq!(result, expected);
 }
 
-/// The `Prover.toml` input bridge, exercised from an always-present fixture (the corpus tests below
-/// skip when the Noir checkout is absent). `interp_inputs_u64` sets `x = 3` and computes
-/// `x * 2 + (p + 1)` natively in u64 — the same value under either field.
+/// The `Prover.toml` input bridge: `interp_inputs_u64` with `x = 3` computes `x*2 + (p+1)` in u64.
 #[test]
 fn interprets_fixture_inputs_from_prover_toml() {
     let root = fixture("interp_inputs_u64");
@@ -153,9 +147,8 @@ fn interprets_fixture_inputs_from_prover_toml() {
     assert_eq!(result, expected, "input bridge must feed x = 3");
 }
 
-/// Signed i32 inputs decode identically on both fields (32-bit two's complement fits every
-/// modulus) and drive signed negation, truncating division, sign-carrying remainder, and
-/// comparison. With `a = -7, b = 2`: `7 + (-3)*10 + (-1)*100 + 2 == -121`.
+/// Signed i32 inputs decode identically on both fields and drive signed arithmetic.
+/// `a = -7, b = 2` → `-121`.
 #[test]
 fn interprets_signed_i32_input() {
     let root = fixture("interp_inputs_i32");
@@ -175,8 +168,7 @@ fn interprets_signed_i32_input() {
     );
 }
 
-/// bn254 positive control for the i64 guard: with 2^64 < p the two's-complement encoding is
-/// injective, so `x = -1` decodes correctly.
+/// bn254 i64 control: with 2^64 < p the encoding is injective, so `x = -1` decodes correctly.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn bn254_decodes_signed_i64_input() {
@@ -197,9 +189,8 @@ fn bn254_decodes_signed_i64_input() {
     );
 }
 
-/// No i64 input is silently decoded under Goldilocks. A negative magnitude is refused by the ABI
-/// parser (it exceeds the field modulus); an in-field positive is refused by the representability
-/// guard (it could be a wrapped negative, since i64's 2^64 range does not fit the field).
+/// Under Goldilocks no i64 input is silently decoded: a negative exceeds the modulus, and an
+/// in-field positive is refused by the representability guard (i64's 2^64 range exceeds the field).
 #[cfg(feature = "goldilocks")]
 #[test]
 fn goldilocks_rejects_unrepresentable_i64_input() {
@@ -219,9 +210,7 @@ fn goldilocks_rejects_unrepresentable_i64_input() {
 }
 
 /// Struct inputs map by declaration order, not the alphabetical ABI map, at every nesting level.
-/// The fixture nests a `Pair` inside an `Outer` and puts both structs' fields out of alphabetical
-/// order, and reaches through an array field, so a positional-on-alphabetical bridge would corrupt
-/// the result: `zeta*1000 + alpha*100 + (1+2+3) == 3706`.
+/// `zeta*1000 + alpha*100 + (1+2+3) == 3706`.
 #[test]
 fn interprets_struct_input_by_declaration_order() {
     let root = fixture("interp_inputs_struct");
@@ -241,10 +230,8 @@ fn interprets_struct_input_by_declaration_order() {
     );
 }
 
-/// An array input plus a helper call, a loop with indexing, and a signed conditional, all fed from
-/// `Prover.toml`, exercise the input bridge and interpreter together. With `xs = [10,20,30,40]`
-/// (weighted `10*1 + 20*2 + 30*3 + 40*4 == 300`) and `k = -3` (negative branch), the result is
-/// `300 - 5 == 295`. Every input is field-independent, so this holds under bn254 and Goldilocks.
+/// Array input, helper call, indexed loop, and a signed conditional, all from `Prover.toml`.
+/// `xs=[10,20,30,40]` (weighted `300`), `k=-3` (negative branch) → `300 - 5 == 295`.
 #[test]
 fn interprets_mixed_inputs() {
     let root = fixture("interp_inputs_mixed");
@@ -358,6 +345,16 @@ fn interprets_slice_intrinsics() {
     let result = interpret_fixture("intrinsic_slice_ops").expect("interpretation should succeed");
     assert_eq!(result, Value::Unit, "main returns unit");
 }
+
+/// Closures need no special handling (the monomorphizer lowers the call to fn-extract + env-prepend).
+/// Covers a lambda through a call, a capturing closure, and a HOF.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_closures() {
+    let result = interpret_fixture("interp_closures").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
 /// `&mut holder.inner_ref.v` peels through a ref-typed field to the live cell, so the write aliases
 /// the original `inner` (sibling untouched) — the multi-layer place peel + the `skip` case.
 #[cfg(not(feature = "goldilocks"))]
@@ -457,6 +454,8 @@ fn renders_field_interpolating_assert_message() {
         other => panic!("expected AssertionFailed with a rendered message, got {other:?}"),
     }
 }
+
+/// A `main` with inputs interprets correctly from `Prover.toml`. `assert_statement` has `x == y == 3`.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn interprets_program_with_inputs() {
@@ -511,11 +510,8 @@ fn interpreter_return_matches_recorded_expected() {
     );
 }
 
-/// A `u64` program whose constant exceeds the Goldilocks modulus (`p + 1`) compiles to a mono-AST
-/// under goldilocks via the reachability-only frontend, and the interpreter computes the correct
-/// native `u64` result — proving the Goldilocks frontend did not corrupt the integer. The expected
-/// value is field-independent, so this single assertion is the cross-field equivalence claim for
-/// this program (the corpus-wide version is `dump_corpus_outcomes` + `cross_field_diff`).
+/// A `u64` program whose constant exceeds the Goldilocks modulus (`p + 1`) compiles under goldilocks
+/// and computes the correct native `u64` result, proving the frontend did not corrupt the integer.
 #[cfg(feature = "goldilocks")]
 #[test]
 fn validates_goldilocks_mono_ast_u64() {
@@ -557,9 +553,8 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// Compile a corpus program through Noir's frontend + monomorphizer and interpret it under a panic
-/// guard, returning the value or a stage-tagged failure. The single interpret path shared by the
-/// coverage survey and the cross-field dump.
+/// Compile + interpret a corpus program under a panic guard, returning the value or a stage-tagged
+/// failure. Shared by the coverage survey and the cross-field dump.
 fn compile_and_interpret_caught(program_dir: &Path) -> Result<Value, (FailureKind, String)> {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("pkg");
@@ -594,8 +589,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "panic".to_string())
 }
 
-/// One program's coverage bucket for the survey: the outcome kind, or the unsupported construct, so
-/// the report maps which constructs block coverage.
+/// One program's coverage bucket: the outcome kind, or the unsupported construct.
 #[cfg(not(feature = "goldilocks"))]
 fn classify(program_dir: &Path) -> String {
     match compile_and_interpret_caught(program_dir) {
@@ -617,8 +611,7 @@ fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../noir/test_programs/execution_success")
 }
 
-/// The field this build targets, used to tag the dump file. The two fields are separate builds
-/// (the field is selected at compile time), so each writes its own file for the diff to consume.
+/// The field this build targets, used to tag the dump file (the two fields are separate builds).
 fn field_tag() -> &'static str {
     if cfg!(feature = "goldilocks") {
         "goldilocks"
@@ -647,9 +640,8 @@ fn git_rev(dir: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// The pinned noir rev, read from the `noirc_frontend` git source in `Cargo.lock`. Returns
-/// "unknown" when a local `[patch]` shadows it with a path source, so a patched dev build is never
-/// mistaken for a pinned one.
+/// The pinned noir rev from the `noirc_frontend` git source in `Cargo.lock`. Returns "unknown" when
+/// a local `[patch]` shadows it with a path source.
 fn noir_rev() -> String {
     let lock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
     let Ok(text) = std::fs::read_to_string(lock) else {
@@ -675,7 +667,7 @@ fn noir_rev() -> String {
     "unknown".to_string()
 }
 
-/// Cross-field differential, step 1: dump this build's per-program outcomes plus provenance to a
+/// Cross-field differential, step 1: dump this build's per-program outcomes + provenance to a
 /// field-tagged JSON file. Run once per field:
 ///   cargo test ... --lib tests::dump_corpus_outcomes -- --ignored
 ///   cargo test ... --features goldilocks --lib tests::dump_corpus_outcomes -- --ignored
@@ -741,9 +733,47 @@ fn dump_corpus_outcomes() {
     );
 }
 
-/// Programs whose result is legitimately field-dependent, with a justification each. Entries are
-/// excluded from the divergence gate but still printed so they stay visible.
-const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[];
+/// Programs whose result is legitimately field-dependent (excluded from the gate, still printed).
+/// Each trips the modulus guard in `to_*_bytes`/`to_*_bits`: a large `N` asserts under Goldilocks
+/// (8-byte / 64-bit) but returns under bn254.
+const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
+    (
+        "to_le_bytes",
+        "to_le_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "to_be_bytes",
+        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "to_bytes_consistent",
+        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "to_bytes_integration",
+        "to_*_bytes::<31/32> and to_le_bits::<254> plus modulus_* builtins are field-sized",
+    ),
+    (
+        "regression_7128",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "unrolling_regression_8333",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "brillig_cow_regression",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "vectors",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "multi_scalar_mul",
+        "to_be_bits::<254> exceeds the Goldilocks 64-bit modulus size",
+    ),
+];
 
 /// The divergence class for a mismatched outcome pair, for the bucketed report.
 fn divergence_bucket(a: &DiffOutcome, b: &DiffOutcome) -> &'static str {
@@ -1087,6 +1117,20 @@ fn oracle_matches_interpreter_smoke() {
         "interp_inputs_u64",
         "interp_inputs_i32",
         "interp_inputs_struct",
+        "interp_refs_scalar",
+        "interp_refs_struct_field",
+        "interp_refs_call_chain",
+        "interp_refs_nested_field",
+        "interp_refs_double_deref_alias",
+        "interp_match_enum",
+        "interp_match_int",
+        "intrinsic_slice_ops",
+        "intrinsic_conversions",
+        "intrinsic_to_bytes",
+        "intrinsic_range_constraint",
+        "interp_intrinsic_hints",
+        "interp_aggregate_eq",
+        "interp_closures",
     ] {
         let result = oracle_compare(&fixture(name));
         assert_eq!(
@@ -1096,11 +1140,9 @@ fn oracle_matches_interpreter_smoke() {
     }
 }
 
-/// The real correctness gate: run the whole `execution_success` corpus through both the interpreter
-/// and Noir's executor and fail on any `MISMATCH` (a genuine interpreter bug) or `FALSE-REJECTION`
-/// (the interpreter rejected a program the executor ran fine). Tolerated `interp-unsupported` cases
-/// are counted, not failed, so a coverage gap stays visible without hiding a false rejection.
-/// `#[ignore]`d (slow) and needs a big stack (deep programs):
+/// The real correctness gate: run the whole `execution_success` corpus through the interpreter and
+/// Noir's executor and fail on any `MISMATCH` or `FALSE-REJECTION`. Tolerated `interp-unsupported`
+/// is counted, not failed. `#[ignore]`d and needs a big stack:
 ///   RUST_MIN_STACK=1073741824 cargo test --lib \
 ///       tests::oracle_survey_execution_success -- --ignored --nocapture
 #[test]
