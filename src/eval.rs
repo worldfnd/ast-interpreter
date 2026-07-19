@@ -262,8 +262,44 @@ impl<'p> Interpreter<'p> {
             Expression::Break => return Ok(Flow::Break),
             Expression::Continue => return Ok(Flow::Continue),
 
-            Expression::Match(_) => {
-                return Err(InterpretError::Unsupported("match expression".to_string()));
+            Expression::Match(m) => {
+                let (local, _name) = &m.variable_to_match;
+                // The elaborator always binds the scrutinee to a preceding local. An enum is a
+                // cell-backed tuple `(tag, payloads…)`.
+                let scrutinee = match env.get(local).cloned().ok_or_else(|| {
+                    InterpretError::Internal("unbound match scrutinee".to_string())
+                })? {
+                    Value::Ref(cell, true) => cell.borrow().clone(),
+                    other => other,
+                };
+
+                // With a default, every case is tag-tested; without one, the last case is the
+                // unconditional fallback.
+                let tested = if m.default_case.is_some() {
+                    m.cases.len()
+                } else {
+                    m.cases.len().checked_sub(1).ok_or_else(|| {
+                        InterpretError::Internal("match with no cases and no default".to_string())
+                    })?
+                };
+
+                for case in &m.cases[..tested] {
+                    if case_matches(&case.constructor, &scrutinee)? {
+                        bind_case_arguments(case, &scrutinee, env)?;
+                        return self.eval(&case.branch, env);
+                    }
+                }
+                match &m.default_case {
+                    Some(default) => return self.eval(default, env),
+                    None => {
+                        let case = m
+                            .cases
+                            .last()
+                            .expect("no default implies a last fallback case");
+                        bind_case_arguments(case, &scrutinee, env)?;
+                        return self.eval(&case.branch, env);
+                    }
+                }
             }
         };
         Ok(Flow::Normal(value))
@@ -770,6 +806,95 @@ fn store_flattened(target: &Rc<RefCell<Value>>, rhs: Value) {
     if !recursed {
         *target.borrow_mut() = rhs;
     }
+}
+
+/// Whether `scrutinee` satisfies `constructor`. The tag is the value itself for int/bool/field
+/// leaves, and the `Field` at tuple index 0 for an enum.
+fn case_matches(constructor: &Constructor, scrutinee: &Value) -> Result<bool, InterpretError> {
+    match constructor {
+        // Sole case (a bare tuple/unit/struct match): always taken.
+        Constructor::Unit | Constructor::Tuple(_) => Ok(true),
+        Constructor::Variant(..) if !constructor.is_enum() => Ok(true),
+        Constructor::True => scrutinee.as_bool(),
+        Constructor::False => Ok(!scrutinee.as_bool()?),
+        // Matching on a `Field` is legal (e.g. `match x { 1 => .. }`), so compare its value.
+        Constructor::Int(want) => match scrutinee {
+            Value::Field(f) => Ok(&field_to_bigint(f) == want),
+            _ => Ok(&scrutinee.as_int()?.value == want),
+        },
+        Constructor::Variant(_, index) => {
+            let Value::Tuple(fields) = scrutinee else {
+                return Err(InterpretError::Type(format!(
+                    "match on non-enum value {scrutinee:?}"
+                )));
+            };
+            let Some(cell) = fields.first() else {
+                return Err(InterpretError::Type(
+                    "enum value missing its Field tag".to_string(),
+                ));
+            };
+            let tag = match &*cell.borrow() {
+                Value::Field(tag) => field_to_bigint(tag),
+                _ => {
+                    return Err(InterpretError::Type("enum tag is not a Field".to_string()));
+                }
+            };
+            Ok(tag == BigInt::from(*index as u64))
+        }
+        // Noir SSA lowers a range case as `tag == 0`, not containment; don't guess a semantics.
+        Constructor::Range(..) => Err(InterpretError::Unsupported(
+            "match range pattern".to_string(),
+        )),
+    }
+}
+
+/// Bind a matched case's argument locals from the scrutinee's payload, `deep_copy`ing out of the
+/// cells so a bound variable never aliases the scrutinee.
+fn bind_case_arguments(
+    case: &MatchCase,
+    scrutinee: &Value,
+    env: &mut Frame,
+) -> Result<(), InterpretError> {
+    if case.arguments.is_empty() {
+        return Ok(());
+    }
+    let payload_cells: Vec<Rc<RefCell<Value>>> = if case.constructor.is_enum() {
+        let Value::Tuple(variants) = scrutinee else {
+            return Err(InterpretError::Type(
+                "enum scrutinee is not a tuple".to_string(),
+            ));
+        };
+        // +1 skips the tag; each variant's payload is itself a tuple.
+        match variants
+            .get(case.constructor.variant_index() + 1)
+            .map(|c| c.borrow().clone())
+        {
+            Some(Value::Tuple(fields)) => fields,
+            _ => {
+                return Err(InterpretError::Type(
+                    "enum variant payload missing".to_string(),
+                ));
+            }
+        }
+    } else {
+        let Value::Tuple(fields) = scrutinee else {
+            return Err(InterpretError::Type(
+                "tuple/struct scrutinee is not a tuple".to_string(),
+            ));
+        };
+        fields.clone()
+    };
+    if payload_cells.len() != case.arguments.len() {
+        return Err(InterpretError::Internal(format!(
+            "match arity mismatch: {} payload vs {} bindings",
+            payload_cells.len(),
+            case.arguments.len()
+        )));
+    }
+    for ((arg, _name), cell) in case.arguments.iter().zip(&payload_cells) {
+        env.insert(*arg, cell.borrow().clone().deep_copy());
+    }
+    Ok(())
 }
 
 // `pub(crate)` so the value-semantics fuzzer (`value_proptest.rs`) can drive the integer op

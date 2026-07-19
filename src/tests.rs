@@ -302,6 +302,53 @@ fn interprets_reference_call_chain() {
     );
 }
 
+/// An enum `match` binds a variant's payload via the `(tag, payload…)` tuple. `x = 3` → `3 * 4 == 12`.
+#[test]
+fn interprets_enum_match() {
+    let root = fixture("interp_match_enum");
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project).expect("frontend");
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
+    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    assert_eq!(
+        result,
+        Value::Int(IntValue {
+            signed: false,
+            bits: 32,
+            value: BigInt::from(12)
+        })
+    );
+}
+
+/// A literal-integer `match`: an exact case (`x = 2 => 300`), the wildcard `default_case`
+/// (`x = 5 => 50`), and a negative signed literal case (`x = -2 => 100`).
+#[test]
+fn interprets_integer_match() {
+    let validated = {
+        let project = NoirProject::new(fixture("interp_match_int")).expect("project");
+        compile_for_validation(&project).expect("frontend")
+    };
+    let run = |x: i32| {
+        let input = Value::Int(IntValue {
+            signed: true,
+            bits: 32,
+            value: BigInt::from(x),
+        });
+        interpret_with_inputs(&validated.program, vec![input]).expect("interpret")
+    };
+    let i32v = |v: i32| {
+        Value::Int(IntValue {
+            signed: true,
+            bits: 32,
+            value: BigInt::from(v),
+        })
+    };
+    assert_eq!(run(2), i32v(300), "exact case");
+    assert_eq!(run(5), i32v(50), "wildcard default (5 * 10)");
+    assert_eq!(run(-2), i32v(100), "negative literal case");
+}
 /// `&mut holder.inner_ref.v` peels through a ref-typed field to the live cell, so the write aliases
 /// the original `inner` (sibling untouched) — the multi-layer place peel + the `skip` case.
 #[cfg(not(feature = "goldilocks"))]
