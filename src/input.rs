@@ -163,7 +163,7 @@ pub(crate) fn value_from_input(
                 .zip(elements)
                 .map(|((field_abi, typ), element)| value_from_input(element, field_abi, typ))
                 .collect::<Result<_, _>>()?;
-            Ok(Value::Tuple(values))
+            Ok(Value::tuple(values))
         }
         (InputValue::Struct(map), Type::Tuple(types)) => {
             // `fields` is declaration-ordered (fields[i] matches types[i]); the input map is a
@@ -190,7 +190,7 @@ pub(crate) fn value_from_input(
                     value_from_input(value, field_abi, typ)
                 })
                 .collect::<Result<_, _>>()?;
-            Ok(Value::Tuple(values))
+            Ok(Value::tuple(values))
         }
         (InputValue::String(s), Type::String(_)) => Ok(Value::Str(s.clone())),
         (input, typ) => Err(InterpretError::Unsupported(format!(

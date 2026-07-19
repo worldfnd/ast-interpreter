@@ -49,10 +49,15 @@ impl DiffValue {
             Value::Array(elements) => {
                 DiffValue::Array(elements.iter().map(DiffValue::from_value).collect())
             }
-            Value::Tuple(elements) => {
-                DiffValue::Tuple(elements.iter().map(DiffValue::from_value).collect())
-            }
+            Value::Tuple(cells) => DiffValue::Tuple(
+                cells
+                    .iter()
+                    .map(|c| DiffValue::from_value(&c.borrow()))
+                    .collect(),
+            ),
             Value::Function(_) => DiffValue::Function,
+            // A returned `main` value is Ref-free, but deref defensively so this stays total.
+            Value::Ref(cell, _) => DiffValue::from_value(&cell.borrow()),
         }
     }
 }
