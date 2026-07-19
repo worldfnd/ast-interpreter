@@ -195,35 +195,36 @@ impl<'p> Interpreter<'p> {
                 for element in elements {
                     values.push(self.eval_expr_value(element, env)?);
                 }
-                Value::Tuple(values)
+                Value::tuple(values)
             }
 
             Expression::ExtractTupleField(tuple, field) => {
-                let value = self.eval_expr_value(tuple, env)?;
-                match value {
-                    Value::Tuple(elements) => elements.get(*field).cloned().ok_or_else(|| {
-                        InterpretError::Type(format!("tuple field {field} out of bounds"))
-                    })?,
-                    other => {
-                        return Err(InterpretError::Type(format!(
-                            "cannot extract field from {other:?}"
-                        )));
-                    }
-                }
+                self.eval_expr_value(tuple, env)?.tuple_field(*field)?
             }
 
             Expression::Call(call) => {
-                let func_id = self.resolve_callee(&call.func, env)?;
+                let callee = self.resolve_callee(&call.func, env)?;
                 let mut args = Vec::with_capacity(call.arguments.len());
                 for argument in &call.arguments {
                     args.push(self.eval_expr_value(argument, env)?);
                 }
-                self.call_function(func_id, args)?
+                match callee {
+                    Callee::Function(id) => self.call_function(id, args)?,
+                    Callee::Intrinsic(name) => {
+                        self.call_intrinsic(name, args, &call.return_type, call.location)?
+                    }
+                }
             }
 
             Expression::Let(let_) => {
                 let value = self.eval_expr_value(&let_.expression, env)?;
-                env.insert(let_.id, value);
+                // A `let mut` slot is a shared cell: reads auto-deref, writes store through it.
+                let bound = if let_.mutable {
+                    Value::Ref(Rc::new(RefCell::new(value)), true)
+                } else {
+                    value
+                };
+                env.insert(let_.id, bound);
                 Value::Unit
             }
 
@@ -389,14 +390,13 @@ impl<'p> Interpreter<'p> {
         &mut self,
         func: &'p Expression,
         env: &mut Frame,
-    ) -> Result<noirc_frontend::monomorphization::ast::FuncId, InterpretError> {
+    ) -> Result<Callee<'p>, InterpretError> {
         if let Expression::Ident(ident) = func {
             match &ident.definition {
-                Definition::Function(id) => return Ok(*id),
+                Definition::Function(id) => return Ok(Callee::Function(*id)),
+                // `#[builtin]`/`#[foreign]` both carry the intrinsic name; dispatch on it.
                 Definition::Builtin(name) | Definition::LowLevel(name) => {
-                    return Err(InterpretError::Unsupported(format!(
-                        "intrinsic/builtin call '{name}'"
-                    )));
+                    return Ok(Callee::Intrinsic(name.as_str()));
                 }
                 Definition::Oracle { name, pure: _ } => {
                     return Err(InterpretError::Unsupported(format!("oracle call '{name}'")));
@@ -405,7 +405,7 @@ impl<'p> Interpreter<'p> {
             }
         }
         match self.eval_expr_value(func, env)? {
-            Value::Function(id) => Ok(id),
+            Value::Function(id) => Ok(Callee::Function(id)),
             other => Err(InterpretError::Type(format!(
                 "call of non-function {other:?}"
             ))),

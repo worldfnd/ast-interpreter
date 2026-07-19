@@ -1,0 +1,6 @@
+[package]
+name = "intrinsic_to_bytes"
+type = "bin"
+authors = [""]
+
+[dependencies]

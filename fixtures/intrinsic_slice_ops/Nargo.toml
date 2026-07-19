@@ -1,0 +1,6 @@
+[package]
+name = "intrinsic_slice_ops"
+type = "bin"
+authors = [""]
+
+[dependencies]

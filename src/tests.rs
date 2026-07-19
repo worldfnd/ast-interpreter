@@ -349,6 +349,15 @@ fn interprets_integer_match() {
     assert_eq!(run(5), i32v(50), "wildcard default (5 * 10)");
     assert_eq!(run(-2), i32v(100), "negative literal case");
 }
+
+/// Pure slice builtins (`len`, `push_back`/`push_front`, `pop_back`/`pop_front`, `insert`, `remove`)
+/// interpret to their expected results; a clean `Unit` means every `assert` held. Field-independent.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_slice_intrinsics() {
+    let result = interpret_fixture("intrinsic_slice_ops").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
 /// `&mut holder.inner_ref.v` peels through a ref-typed field to the live cell, so the write aliases
 /// the original `inner` (sibling untouched) — the multi-layer place peel + the `skip` case.
 #[cfg(not(feature = "goldilocks"))]
@@ -365,6 +374,47 @@ fn interprets_reference_through_struct_field() {
 fn interprets_multi_level_reference_aliasing() {
     let result =
         interpret_fixture("interp_refs_double_deref_alias").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// Hint builtins `black_box` (identity) and `as_witness`/`assert_constant` (no-ops) dispatch and run.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_hint_intrinsics() {
+    let result =
+        interpret_fixture("interp_intrinsic_hints").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// `x.assert_max_bit_size::<48>()` (the `apply_range_constraint` builtin) holds for `x = 3`. Gated
+/// off under goldilocks: `assert_max_bit_size` lives in `std/field/mod.nr`, not yet elaborated there.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_range_constraint_intrinsic() {
+    let root = fixture("intrinsic_range_constraint");
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project).expect("frontend");
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
+    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    assert_eq!(result, Value::Unit);
+}
+
+/// String<->byte builtins (`str::as_bytes`, `as_str_unchecked`) and array->slice (`as_vector`) round-trip.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_conversion_intrinsics() {
+    let result = interpret_fixture("intrinsic_conversions").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// Field decomposition (`to_le_bytes`/`to_be_bytes`/`to_le_bits`) with a small value/`N` so the
+/// modulus guard never trips. Drives `to_radix`, `static_assert`, `is_unconstrained`, `modulus_*`.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn interprets_decomposition_intrinsics() {
+    let result = interpret_fixture("intrinsic_to_bytes").expect("interpretation should succeed");
     assert_eq!(result, Value::Unit, "main returns unit");
 }
 #[cfg(not(feature = "goldilocks"))]
