@@ -11,7 +11,7 @@ use super::value::Value;
 
 /// Bump whenever `DiffOutcome` or `DumpProvenance` changes shape, so a stale dump is rejected
 /// rather than silently misread.
-pub const DUMP_FORMAT_VERSION: u32 = 1;
+pub const DUMP_FORMAT_VERSION: u32 = 2;
 
 /// A field-independent encoding of an interpreter [`Value`] for cross-field comparison.
 ///
@@ -57,22 +57,21 @@ impl DiffValue {
     }
 }
 
-/// Why a program failed to produce a value, discriminated so cross-field outcomes are compared by
-/// cause rather than lumped together. The stage kinds (`ProjectLoad`/`CompileError`/`InputError`)
-/// come from the harness; the rest project the [`InterpretError`] variants via [`failure_kind_of`].
+/// A normalized failure cause for comparing cross-field outcomes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum FailureKind {
     ProjectLoad,
     CompileError,
     InputError,
-    /// Normalized construct kind; reserved for tightening once Goldilocks stops being mostly
-    /// `Unsupported`.
+    /// Normalized unsupported construct kind.
     Unsupported {
         construct: String,
     },
     AssertionFailed,
     Overflow,
     DivisionByZero,
+    ValueOutOfRange,
     TypeError,
     Internal,
     /// The compiler or interpreter panicked; never equivalent to a non-panic outcome.
@@ -94,6 +93,8 @@ pub fn failure_kind_of(error: &InterpretError) -> FailureKind {
         InterpretError::AssertionFailed { .. } => FailureKind::AssertionFailed,
         InterpretError::Overflow(_) => FailureKind::Overflow,
         InterpretError::DivisionByZero => FailureKind::DivisionByZero,
+        InterpretError::ValueOutOfRange(_) => FailureKind::ValueOutOfRange,
+        InterpretError::InvalidInput(_) => FailureKind::InputError,
         InterpretError::Type(_) => FailureKind::TypeError,
         InterpretError::Unsupported(msg) => FailureKind::Unsupported {
             construct: normalize_construct(msg),

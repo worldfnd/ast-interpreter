@@ -135,7 +135,7 @@ impl Value {
         let repr = int.unsigned_repr();
         let (sign, digits) = repr.to_u64_digits();
         if sign == Sign::Minus || digits.len() > 1 {
-            return Err(InterpretError::Type(format!(
+            return Err(InterpretError::ValueOutOfRange(format!(
                 "index out of usize range: {repr}"
             )));
         }

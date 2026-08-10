@@ -67,15 +67,28 @@ pub fn interpret_with_inputs(
     inputs: Vec<Value>,
 ) -> Result<Value, InterpretError> {
     let mut interp = Interpreter::new(program);
-    let main = interp.main_function()?;
+    let main = main_function_of(program)?;
     if main.parameters.len() != inputs.len() {
-        return Err(InterpretError::Unsupported(format!(
+        return Err(InterpretError::InvalidInput(format!(
             "entry point expects {} input(s), got {}",
             main.parameters.len(),
             inputs.len()
         )));
     }
     interp.call_function(main.id, inputs)
+}
+
+pub(crate) fn function_of(program: &Program, id: FuncId) -> Result<&Function, InterpretError> {
+    program
+        .functions
+        .get(id.0 as usize)
+        .filter(|f| f.id == id)
+        .ok_or_else(|| InterpretError::Internal(format!("unknown function id {id}")))
+}
+
+pub(crate) fn main_function_of(program: &Program) -> Result<&Function, InterpretError> {
+    function_of(program, Program::main_id())
+        .map_err(|_| InterpretError::Internal("program has no entry point".to_string()))
 }
 
 impl<'p> Interpreter<'p> {
@@ -86,18 +99,8 @@ impl<'p> Interpreter<'p> {
         }
     }
 
-    /// The program's entry point, looked up by its canonical [`Program::main_id`] rather than by
-    /// position.
-    fn main_function(&self) -> Result<&'p Function, InterpretError> {
-        self.function(Program::main_id())
-    }
-
     fn function(&self, id: FuncId) -> Result<&'p Function, InterpretError> {
-        self.program
-            .functions
-            .iter()
-            .find(|f| f.id == id)
-            .ok_or_else(|| InterpretError::Internal(format!("unknown function id {id}")))
+        function_of(self.program, id)
     }
 
     fn call_function(&mut self, id: FuncId, args: Vec<Value>) -> Result<Value, InterpretError> {

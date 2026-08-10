@@ -2,6 +2,7 @@ use acvm::{AcirField, FieldElement};
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
 
+use noirc_errors::Location;
 use noirc_frontend::ast::{BinaryOpKind, UnaryOp};
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, GlobalId, LValue, Literal, Type,
@@ -15,6 +16,15 @@ use super::{Flow, Frame, Interpreter};
 enum Step {
     Index(usize),
     Field(usize),
+}
+
+fn index_out_of_bounds(location: Location, index: usize, len: usize) -> InterpretError {
+    InterpretError::AssertionFailed {
+        location,
+        message: Some(format!(
+            "Index out of bounds, array has size {len}, but index was {index}"
+        )),
+    }
 }
 
 impl<'p> Interpreter<'p> {
@@ -87,12 +97,10 @@ impl<'p> Interpreter<'p> {
                 let i = self.eval_expr_value(&index.index, env)?.as_index()?;
                 let collection = self.eval_expr_value(&index.collection, env)?;
                 match collection {
-                    Value::Array(elements) => elements.get(i).cloned().ok_or_else(|| {
-                        InterpretError::Type(format!(
-                            "index {i} out of bounds (len {})",
-                            elements.len()
-                        ))
-                    })?,
+                    Value::Array(elements) => elements
+                        .get(i)
+                        .cloned()
+                        .ok_or_else(|| index_out_of_bounds(index.location, i, elements.len()))?,
                     other => {
                         return Err(InterpretError::Type(format!("cannot index {other:?}")));
                     }
@@ -643,7 +651,7 @@ fn shift_amount(b: &IntValue) -> Result<usize, InterpretError> {
     match digits.as_slice() {
         [] => Ok(0),
         [single] => Ok(*single as usize),
-        _ => Err(InterpretError::Type("shift amount too large".to_string())),
+        _ => Err(InterpretError::Overflow("shift amount".to_string())),
     }
 }
 

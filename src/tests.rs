@@ -8,11 +8,11 @@ use super::diff::{
 use super::loader::NoirProject;
 use super::validation_frontend::compile_for_validation;
 use super::{
-    DiffOutcome, DiffValue, IntValue, Value, inputs_from_prover_toml, interpret_with_inputs,
-    outcomes_equivalent,
+    DiffOutcome, DiffValue, IntValue, InterpretError, Value, inputs_from_prover_toml,
+    interpret_with_inputs, outcomes_equivalent,
 };
 #[cfg(not(feature = "goldilocks"))]
-use super::{InterpretError, expected_return_from_prover_toml, interpret};
+use super::{expected_return_from_prover_toml, interpret};
 use acvm::{AcirField, FieldElement};
 use num_bigint::BigInt;
 
@@ -138,6 +138,10 @@ fn interprets_fixture_inputs_from_prover_toml() {
     let inputs =
         inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
 
+    assert!(matches!(
+        interpret_with_inputs(&validated.program, Vec::new()),
+        Err(InterpretError::InvalidInput(_))
+    ));
     let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
     let expected = Value::Int(IntValue {
         signed: false,
@@ -197,7 +201,6 @@ fn bn254_decodes_signed_i64_input() {
 #[cfg(feature = "goldilocks")]
 #[test]
 fn goldilocks_rejects_unrepresentable_i64_input() {
-    use super::InterpretError;
     let root = fixture("neg_interp_inputs_i64");
     let project = NoirProject::new(root).expect("project");
     let validated = compile_for_validation(&project).expect("frontend");
@@ -379,7 +382,7 @@ fn compile_and_interpret_caught(program_dir: &Path) -> Result<Value, (FailureKin
             .map_err(|e| (FailureKind::CompileError, e.to_string()))?;
         let inputs = match std::fs::read_to_string(root.join("Prover.toml")) {
             Ok(src) => inputs_from_prover_toml(&validated.program, &validated.abi, &src)
-                .map_err(|e| (FailureKind::InputError, e.to_string()))?,
+                .map_err(|e| (failure_kind_of(&e), e.to_string()))?,
             Err(_) => Vec::new(),
         };
         interpret_with_inputs(&validated.program, inputs)
@@ -784,7 +787,7 @@ fn oracle_compare(program_dir: &Path) -> String {
             .map_err(|e| (FailureKind::CompileError, e.to_string()))?;
         let inputs = match &prover_src {
             Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
-                .map_err(|e| (FailureKind::InputError, e.to_string()))?,
+                .map_err(|e| (failure_kind_of(&e), e.to_string()))?,
             None => Vec::new(),
         };
         let value = interpret_with_inputs(&validated.program, inputs)
@@ -812,9 +815,9 @@ fn oracle_compare(program_dir: &Path) -> String {
             let oracle_value = match oracle_ret {
                 None => Value::Unit,
                 Some(iv) => {
-                    let ret_ty = match validated.program.functions.first() {
-                        Some(f) => &f.return_type,
-                        None => return "oracle-errored: program has no functions".to_string(),
+                    let ret_ty = match crate::main_function_of(&validated.program) {
+                        Ok(f) => &f.return_type,
+                        Err(e) => return format!("oracle-errored: {e}"),
                     };
                     match validated.abi.return_type.as_ref() {
                         Some(r) => match crate::input::value_from_input(&iv, &r.abi_type, ret_ty) {

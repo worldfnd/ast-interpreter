@@ -26,26 +26,21 @@ pub fn inputs_from_prover_toml(
 ) -> Result<Vec<Value>, InterpretError> {
     let map = Format::Toml
         .parse(toml_src, abi)
-        .map_err(|e| InterpretError::Internal(format!("failed to parse Prover.toml: {e}")))?;
+        .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
 
-    let main = program
-        .functions
-        .first()
-        .ok_or_else(|| InterpretError::Internal("program has no functions".to_string()))?;
+    let main = super::main_function_of(program)?;
 
     let mut inputs = Vec::with_capacity(main.parameters.len());
     for (_, _, name, typ, _) in &main.parameters {
-        let input = map
-            .get(name)
-            .ok_or_else(|| InterpretError::Internal(format!("missing input '{name}'")))?;
-        // Match the ABI parameter by name, not position — the ABI order is not guaranteed to align
-        // with the monomorphized parameter order.
         let abi_type = abi
             .parameters
             .iter()
             .find(|p| &p.name == name)
             .map(|p| &p.typ)
             .ok_or_else(|| InterpretError::Internal(format!("no ABI parameter named '{name}'")))?;
+        let input = map
+            .get(name)
+            .ok_or_else(|| InterpretError::Internal(format!("no parsed input for '{name}'")))?;
         inputs.push(value_from_input(input, abi_type, typ)?);
     }
     Ok(inputs)
@@ -61,19 +56,20 @@ pub fn expected_return_from_prover_toml(
 ) -> Result<Option<Value>, InterpretError> {
     let map = Format::Toml
         .parse(toml_src, abi)
-        .map_err(|e| InterpretError::Internal(format!("failed to parse Prover.toml: {e}")))?;
+        .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
     let Some(input) = map.get(MAIN_RETURN_NAME) else {
         return Ok(None);
     };
-    let main = program
-        .functions
-        .first()
-        .ok_or_else(|| InterpretError::Internal("program has no functions".to_string()))?;
+    let main = super::main_function_of(program)?;
     let abi_type = abi
         .return_type
         .as_ref()
         .map(|r| &r.abi_type)
-        .ok_or_else(|| InterpretError::Internal("ABI has no return type".to_string()))?;
+        .ok_or_else(|| {
+            InterpretError::Internal(
+                "Prover.toml parsed a return value but the ABI declares no return type".to_string(),
+            )
+        })?;
     Ok(Some(value_from_input(input, abi_type, &main.return_type)?))
 }
 
@@ -102,7 +98,7 @@ pub(crate) fn value_from_input(
             // value's two's-complement bit pattern in `[0, 2^bits)`.
             let raw = field_to_bigint(field);
             if raw.bits() > width as u64 {
-                return Err(InterpretError::Type(format!(
+                return Err(InterpretError::InvalidInput(format!(
                     "integer input does not fit a {width}-bit type"
                 )));
             }
@@ -115,15 +111,21 @@ pub(crate) fn value_from_input(
         (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(*field != FieldElement::zero())),
         (InputValue::Vec(elements), Type::Array(length, element_type)) => {
             let AbiType::Array {
-                typ: element_abi, ..
+                length: abi_length,
+                typ: element_abi,
             } = abi_type
             else {
-                return Err(InterpretError::Type(format!(
+                return Err(InterpretError::Internal(format!(
                     "ABI type {abi_type:?} is not an array"
                 )));
             };
+            if abi_length != length {
+                return Err(InterpretError::Internal(format!(
+                    "array ABI length is {abi_length}, type expects {length}"
+                )));
+            }
             if elements.len() != *length as usize {
-                return Err(InterpretError::Type(format!(
+                return Err(InterpretError::InvalidInput(format!(
                     "array input has {} elements, type expects {length}",
                     elements.len()
                 )));
@@ -136,12 +138,20 @@ pub(crate) fn value_from_input(
         }
         (InputValue::Vec(elements), Type::Tuple(types)) => {
             let AbiType::Tuple { fields } = abi_type else {
-                return Err(InterpretError::Type(format!(
+                return Err(InterpretError::Internal(format!(
                     "ABI type {abi_type:?} is not a tuple"
                 )));
             };
-            if elements.len() != types.len() || fields.len() != types.len() {
-                return Err(InterpretError::Type(format!(
+
+            if fields.len() != types.len() {
+                return Err(InterpretError::Internal(format!(
+                    "tuple ABI has {} fields, type expects {}",
+                    fields.len(),
+                    types.len()
+                )));
+            }
+            if elements.len() != types.len() {
+                return Err(InterpretError::InvalidInput(format!(
                     "tuple input has {} elements, type expects {}",
                     elements.len(),
                     types.len()
@@ -159,12 +169,12 @@ pub(crate) fn value_from_input(
             // `fields` is declaration-ordered (fields[i] matches types[i]); the input map is a
             // BTreeMap (alphabetical), so look each field up by name rather than iterate it.
             let AbiType::Struct { fields, .. } = abi_type else {
-                return Err(InterpretError::Type(format!(
+                return Err(InterpretError::Internal(format!(
                     "ABI type {abi_type:?} is not a struct"
                 )));
             };
             if fields.len() != types.len() {
-                return Err(InterpretError::Type(format!(
+                return Err(InterpretError::Internal(format!(
                     "struct ABI has {} fields, type expects {}",
                     fields.len(),
                     types.len()
@@ -175,7 +185,7 @@ pub(crate) fn value_from_input(
                 .zip(types)
                 .map(|((name, field_abi), typ)| {
                     let value = map.get(name).ok_or_else(|| {
-                        InterpretError::Type(format!("missing struct field '{name}'"))
+                        InterpretError::Internal(format!("ABI struct has no field '{name}'"))
                     })?;
                     value_from_input(value, field_abi, typ)
                 })
