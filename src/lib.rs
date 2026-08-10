@@ -48,9 +48,14 @@ enum Flow {
     Continue,
 }
 
+enum GlobalState {
+    InProgress,
+    Done(Value),
+}
+
 pub(crate) struct Interpreter<'p> {
     program: &'p Program,
-    globals: HashMap<GlobalId, Value>,
+    globals: HashMap<GlobalId, GlobalState>,
 }
 
 /// Interpret `program`'s entry point with no inputs (for self-checking programs whose `main`

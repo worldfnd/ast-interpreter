@@ -10,11 +10,11 @@ use noirc_frontend::monomorphization::ast::{
 
 use super::error::InterpretError;
 use super::value::{IntValue, Value, field_to_bigint};
-use super::{Flow, Frame, Interpreter};
+use super::{Flow, Frame, GlobalState, Interpreter};
 
-/// A step along an lvalue access path, rooted at a local variable.
+#[derive(Debug)]
 enum Step {
-    Index(usize),
+    Index(usize, Location),
     Field(usize),
 }
 
@@ -248,17 +248,30 @@ impl<'p> Interpreter<'p> {
     /// Evaluate a global on first reference and cache it. Untouched globals may use constructs this
     /// interpreter does not yet support, so they stay lazy.
     fn eval_global(&mut self, id: GlobalId) -> Result<Value, InterpretError> {
-        if let Some(value) = self.globals.get(&id) {
-            return Ok(value.clone());
+        match self.globals.get(&id) {
+            Some(GlobalState::Done(value)) => return Ok(value.clone()),
+            Some(GlobalState::InProgress) => {
+                return Err(InterpretError::Internal(format!(
+                    "global {id:?} is defined in terms of itself"
+                )));
+            }
+            None => {}
         }
         let program = self.program;
         let (_, _, expr) = program
             .globals
             .get(&id)
             .ok_or_else(|| InterpretError::Internal(format!("unknown global {id:?}")))?;
+        self.globals.insert(id, GlobalState::InProgress);
         let mut frame = Frame::new();
-        let value = self.eval_expr_value(expr, &mut frame)?;
-        self.globals.insert(id, value.clone());
+        let value = match self.eval_expr_value(expr, &mut frame) {
+            Ok(value) => value,
+            Err(e) => {
+                self.globals.remove(&id);
+                return Err(e);
+            }
+        };
+        self.globals.insert(id, GlobalState::Done(value.clone()));
         Ok(value)
     }
 
@@ -506,10 +519,27 @@ impl<'p> Interpreter<'p> {
                     "assignment to a non-local binding".to_string(),
                 )),
             },
-            LValue::Index { array, index, .. } => {
-                let i = self.eval_expr_value(index, env)?.as_index()?;
+            LValue::Index {
+                array,
+                index,
+                location,
+                ..
+            } => {
                 let (root, mut path) = self.lvalue_path(array, env)?;
-                path.push(Step::Index(i));
+                let i = self.eval_expr_value(index, env)?.as_index()?;
+                let root_value = env.get(&root).ok_or_else(|| {
+                    InterpretError::Internal("assignment to unbound local".to_string())
+                })?;
+                match value_at(root_value, &path)? {
+                    Value::Array(elements) if i < elements.len() => {}
+                    Value::Array(elements) => {
+                        return Err(index_out_of_bounds(*location, i, elements.len()));
+                    }
+                    other => {
+                        return Err(InterpretError::Type(format!("cannot index {other:?}")));
+                    }
+                }
+                path.push(Step::Index(i, *location));
                 Ok((root, path))
             }
             LValue::MemberAccess {
@@ -528,18 +558,31 @@ impl<'p> Interpreter<'p> {
     }
 }
 
+/// Resolve a checked lvalue prefix; failure indicates an interpreter invariant violation.
+fn value_at<'v>(root: &'v Value, path: &[Step]) -> Result<&'v Value, InterpretError> {
+    let mut value = root;
+    for step in path {
+        value = match (step, value) {
+            (Step::Index(i, _), Value::Array(elements)) => elements.get(*i),
+            (Step::Field(i), Value::Tuple(elements)) => elements.get(*i),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            InterpretError::Internal(format!("lvalue path step {step:?} left the value shape"))
+        })?;
+    }
+    Ok(value)
+}
+
 /// Functionally update a nested value at `path`, returning the new root value.
 fn update_path(value: Value, path: &[Step], new: Value) -> Result<Value, InterpretError> {
     let Some((step, rest)) = path.split_first() else {
         return Ok(new);
     };
     match (step, value) {
-        (Step::Index(i), Value::Array(mut elements)) => {
+        (Step::Index(i, location), Value::Array(mut elements)) => {
             if *i >= elements.len() {
-                return Err(InterpretError::Type(format!(
-                    "assignment index {i} out of bounds (len {})",
-                    elements.len()
-                )));
+                return Err(index_out_of_bounds(*location, *i, elements.len()));
             }
             let child = std::mem::replace(&mut elements[*i], Value::Unit);
             elements[*i] = update_path(child, rest, new)?;
