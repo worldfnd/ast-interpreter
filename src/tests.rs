@@ -16,6 +16,14 @@ use super::{expected_return_from_prover_toml, interpret};
 use acvm::{AcirField, FieldElement};
 use num_bigint::BigInt;
 
+fn validation_failure_kind(error: &super::validation_frontend::ValidationError) -> FailureKind {
+    if error.is_dependency_compile_gap() {
+        FailureKind::DependencyCompileGap
+    } else {
+        FailureKind::CompileError
+    }
+}
+
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
 /// `neg_` prefix (built via [`negative_fixture`]).
 fn fixture(name: &str) -> PathBuf {
@@ -40,8 +48,7 @@ fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
 
 /// Under bn254 the self-checking `interp_basic` program interprets to a clean `Unit` with every
 /// `assert` holding — the interpreter agrees with Noir's semantics on real monomorphized output.
-/// Gated off under goldilocks, where the auto-injected bn254 stdlib blocks compiling this source
-/// until the stdlib port lands; the interpreter itself is already field-agnostic.
+/// Gated off under goldilocks because the auto-injected bn254 stdlib does not compile for that field.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn interprets_basic_corpus_program() {
@@ -84,11 +91,7 @@ fn rejects_reachable_type_error() {
     }
 }
 
-/// A program that *reaches* code from a tolerated-error file (the stdlib's `ops/arith.nr` under
-/// goldilocks, whose `wrapping_sub_hlp` carries a 2^128 Field constant) must be rejected loudly —
-/// otherwise the wrongly-typed HIR the tolerated error leaves behind could monomorphize silently
-/// into a wrong AST. The bn254 counterpart below proves the fixture is sound, so this is the
-/// invariant firing, not a broken fixture.
+/// Reached dependency code with tolerated diagnostics must be rejected before interpretation.
 #[cfg(feature = "goldilocks")]
 #[test]
 fn rejects_reached_dependency_error() {
@@ -97,16 +100,15 @@ fn rejects_reached_dependency_error() {
         Ok(_) => panic!(
             "a program reaching code from a tolerated-error file must be rejected, not validated"
         ),
-        Err(e) => format!("{e:?}"),
+        Err(e) => e,
     };
     assert!(
-        err.contains("failed elaboration"),
+        err.is_dependency_compile_gap(),
         "expected the tolerated-file invariant rejection, got: {err}"
     );
 }
 
-/// bn254 positive control for [`rejects_reached_dependency_error`]: the same fixture compiles and
-/// interprets cleanly when the stdlib elaborates. `3.wrapping_sub(1) == 2`.
+/// The same dependency fixture compiles and interprets under bn254.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn interprets_reached_dep_fixture_on_bn254() {
@@ -379,7 +381,7 @@ fn compile_and_interpret_caught(program_dir: &Path) -> Result<Value, (FailureKin
         // The reachability-only validation frontend does not let the unreached bn254 crypto stdlib
         // block the Goldilocks arm.
         let validated = compile_for_validation(&project)
-            .map_err(|e| (FailureKind::CompileError, e.to_string()))?;
+            .map_err(|e| (validation_failure_kind(&e), e.to_string()))?;
         let inputs = match std::fs::read_to_string(root.join("Prover.toml")) {
             Ok(src) => inputs_from_prover_toml(&validated.program, &validated.abi, &src)
                 .map_err(|e| (failure_kind_of(&e), e.to_string()))?,
@@ -483,7 +485,7 @@ fn noir_rev() -> String {
 /// field-tagged JSON file. Run once per field:
 ///   cargo test ... --lib tests::dump_corpus_outcomes -- --ignored
 ///   cargo test ... --features goldilocks --lib tests::dump_corpus_outcomes -- --ignored
-/// The Goldilocks dump is mostly `Errored` until the stdlib port lands.
+/// Dependency compilation gaps are recorded as errored outcomes.
 #[test]
 #[ignore = "cross-field differential: dump this field's interpreter outcomes"]
 fn dump_corpus_outcomes() {
@@ -566,7 +568,7 @@ fn divergence_bucket(a: &DiffOutcome, b: &DiffOutcome) -> &'static str {
 /// Write the bucketed divergence report to `target/cross_field_report.{json,md}`.
 fn write_cross_field_report(
     divergences: &[(String, &'static str, String)],
-    tolerated: usize,
+    tolerated: &[String],
     missing: &[String],
 ) {
     use std::collections::BTreeMap;
@@ -585,9 +587,17 @@ fn write_cross_field_report(
     }
     let mut md = String::from("# Cross-field divergence report\n\n");
     md.push_str(&format!(
-        "- tolerated (Unsupported on a side): {tolerated}\n- missing from a dump: {}\n\n",
+        "- tolerated (coverage gap on a side): {}\n- missing from a dump: {}\n\n",
+        tolerated.len(),
         missing.len()
     ));
+    if !tolerated.is_empty() {
+        md.push_str(&format!("## tolerated ({})\n\n", tolerated.len()));
+        for name in tolerated {
+            md.push_str(&format!("- {name}\n"));
+        }
+        md.push('\n');
+    }
     for (bucket, entries) in &by_bucket {
         md.push_str(&format!("## {bucket} ({})\n\n", entries.len()));
         for entry in entries {
@@ -600,7 +610,7 @@ fn write_cross_field_report(
 
 /// Cross-field differential, step 2: diff the two field dumps. Integer/struct values must match;
 /// `Field` values may differ. Refuses to run when the dumps come from mismatched builds, tolerates
-/// `Unsupported` on either side (counted separately) while never hiding a crash, and writes a
+/// coverage gaps (counted separately) while never hiding a crash, and writes a
 /// bucketed report to `target/cross_field_report.{json,md}`.
 #[test]
 #[ignore = "cross-field differential: diff the bn254 and goldilocks dumps"]
@@ -660,8 +670,9 @@ fn cross_field_diff() {
     let mut divergences: Vec<(String, &'static str, String)> = Vec::new();
     let mut allowlisted_hits: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
-    let mut tolerated = 0usize;
+    let mut tolerated_names: Vec<String> = Vec::new();
     let mut compared = 0usize;
+    let mut value_pairs = 0usize;
 
     for (name, b) in &bn {
         let Some(g) = gl.get(name) else {
@@ -669,10 +680,13 @@ fn cross_field_diff() {
             continue;
         };
         compared += 1;
+        if matches!((b, g), (DiffOutcome::Returned(_), DiffOutcome::Returned(_))) {
+            value_pairs += 1;
+        }
         match outcomes_equivalent(b, g) {
             Ok(()) => {
                 if outcome_is_tolerated(b, g) {
-                    tolerated += 1;
+                    tolerated_names.push(name.clone());
                 }
             }
             Err(reason) if allowlisted.contains(name.as_str()) => {
@@ -687,10 +701,11 @@ fn cross_field_diff() {
         }
     }
 
-    write_cross_field_report(&divergences, tolerated, &missing);
+    let tolerated = tolerated_names.len();
+    write_cross_field_report(&divergences, &tolerated_names, &missing);
 
     println!(
-        "compared {compared} programs: {} divergent, {tolerated} tolerated (Unsupported), {} allowlisted, {} missing",
+        "compared {compared} programs: {} divergent, {tolerated} tolerated (coverage gap), {} allowlisted, {} missing",
         divergences.len(),
         allowlisted_hits.len(),
         missing.len()
@@ -705,6 +720,16 @@ fn cross_field_diff() {
         divergences.is_empty(),
         "{} cross-field divergence(s) outside the allowlist",
         divergences.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "{} program(s) were missing from one field dump: {}",
+        missing.len(),
+        missing.join(", ")
+    );
+    assert!(
+        value_pairs > 0,
+        "none of the {compared} shared programs returned values under both fields"
     );
 }
 
@@ -784,7 +809,7 @@ fn oracle_compare(program_dir: &Path) -> String {
     // executor's return when both succeed.
     let interp = panic::catch_unwind(AssertUnwindSafe(|| {
         let validated = compile_for_validation(&project)
-            .map_err(|e| (FailureKind::CompileError, e.to_string()))?;
+            .map_err(|e| (validation_failure_kind(&e), e.to_string()))?;
         let inputs = match &prover_src {
             Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
                 .map_err(|e| (failure_kind_of(&e), e.to_string()))?,

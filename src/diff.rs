@@ -63,6 +63,7 @@ impl DiffValue {
 pub enum FailureKind {
     ProjectLoad,
     CompileError,
+    DependencyCompileGap,
     InputError,
     /// Normalized unsupported construct kind.
     Unsupported {
@@ -112,12 +113,44 @@ pub(crate) fn normalize_construct(msg: &str) -> String {
         .to_string()
 }
 
-/// Whether two cross-field outcomes for the same program are equivalent (`Ok(())`), or diverge
-/// (`Err(reason)`). Two `Returned` outcomes must agree on integers/structure; a crash on either
-/// side always surfaces; `Unsupported` on either side is tolerated (the Goldilocks side is mostly
-/// `Unsupported` until the stdlib port lands) but [`outcome_is_tolerated`] lets the caller count
-/// those so a coverage gap never reads as a pass. Any other kind mismatch is a divergence.
+fn is_panic(outcome: &DiffOutcome) -> bool {
+    matches!(
+        outcome,
+        DiffOutcome::Errored {
+            kind: FailureKind::Panic,
+            ..
+        }
+    )
+}
+
+/// Whether this outcome provides no executable result to compare.
+fn is_coverage_gap(outcome: &DiffOutcome) -> bool {
+    matches!(
+        outcome,
+        DiffOutcome::Errored {
+            kind: FailureKind::Unsupported { .. } | FailureKind::DependencyCompileGap,
+            ..
+        }
+    )
+}
+
+/// Compare cross-field outcomes, tolerating countable coverage gaps while rejecting value, error,
+/// and one-sided panic mismatches.
 pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), String> {
+    if is_panic(a) || is_panic(b) {
+        return match (a, b) {
+            (DiffOutcome::Errored { kind: ka, .. }, DiffOutcome::Errored { kind: kb, .. })
+                if ka == kb =>
+            {
+                Ok(())
+            }
+            _ => Err(format!("crash on one side: {a:?} vs {b:?}")),
+        };
+    }
+
+    if is_coverage_gap(a) || is_coverage_gap(b) {
+        return Ok(());
+    }
     match (a, b) {
         (DiffOutcome::Returned(x), DiffOutcome::Returned(y)) => values_equivalent(x, y),
         (DiffOutcome::Returned(_), DiffOutcome::Errored { kind, detail }) => Err(format!(
@@ -127,19 +160,7 @@ pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), Strin
             "one field errored ({kind:?}: {detail}), the other returned a value"
         )),
         (DiffOutcome::Errored { kind: ka, .. }, DiffOutcome::Errored { kind: kb, .. }) => {
-            let panicked = |k: &FailureKind| matches!(k, FailureKind::Panic);
-            let unsupported = |k: &FailureKind| matches!(k, FailureKind::Unsupported { .. });
-            if panicked(ka) || panicked(kb) {
-                // A crash is never equivalent to anything else, tolerance notwithstanding.
-                if ka == kb {
-                    Ok(())
-                } else {
-                    Err(format!("crash on one side: {ka:?} vs {kb:?}"))
-                }
-            } else if unsupported(ka) || unsupported(kb) {
-                // TODO: compare the construct once Goldilocks stops being mostly-`Unsupported`.
-                Ok(())
-            } else if ka == kb {
+            if ka == kb {
                 Ok(())
             } else {
                 Err(format!("both errored, but differently: {ka:?} vs {kb:?}"))
@@ -148,15 +169,9 @@ pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), Strin
     }
 }
 
-/// Whether an outcome pair was let through only because `Unsupported` is tolerated (rather than a
-/// genuine agreement), so the caller can count it as a coverage gap.
+/// Whether equivalence depends on tolerating a coverage gap.
 pub fn outcome_is_tolerated(a: &DiffOutcome, b: &DiffOutcome) -> bool {
-    matches!(
-        (a, b),
-        (DiffOutcome::Errored { kind: ka, .. }, DiffOutcome::Errored { kind: kb, .. })
-            if (matches!(ka, FailureKind::Unsupported { .. }) || matches!(kb, FailureKind::Unsupported { .. }))
-                && !matches!(ka, FailureKind::Panic) && !matches!(kb, FailureKind::Panic)
-    )
+    !is_panic(a) && !is_panic(b) && (is_coverage_gap(a) || is_coverage_gap(b))
 }
 
 /// A dump's provenance, stamped when it is written so two dumps from mismatched builds are rejected
@@ -300,13 +315,29 @@ mod tests {
         }
     }
 
+    fn unsupported() -> DiffOutcome {
+        errored(FailureKind::Unsupported {
+            construct: "intrinsic".to_string(),
+        })
+    }
+
     #[test]
-    fn returned_vs_errored_diverges() {
+    fn returned_vs_real_error_diverges() {
         let a = DiffOutcome::Returned(int("1"));
-        let b = errored(FailureKind::Unsupported {
-            construct: "reference".to_string(),
-        });
+        let b = errored(FailureKind::CompileError);
         assert!(outcomes_equivalent(&a, &b).is_err());
+        assert!(!outcome_is_tolerated(&a, &b));
+    }
+
+    #[test]
+    fn returned_vs_coverage_gap_is_tolerated_and_counted() {
+        let ran = DiffOutcome::Returned(int("1"));
+        for gap in [unsupported(), errored(FailureKind::DependencyCompileGap)] {
+            assert!(outcomes_equivalent(&ran, &gap).is_ok());
+            assert!(outcome_is_tolerated(&ran, &gap));
+            assert!(outcomes_equivalent(&gap, &ran).is_ok());
+            assert!(outcome_is_tolerated(&gap, &ran));
+        }
     }
 
     #[test]
@@ -317,23 +348,28 @@ mod tests {
 
     #[test]
     fn unsupported_is_tolerated_and_counted() {
-        let u = errored(FailureKind::Unsupported {
-            construct: "intrinsic".to_string(),
-        });
+        let u = unsupported();
         let c = errored(FailureKind::CompileError);
         assert!(outcomes_equivalent(&u, &c).is_ok());
         assert!(outcome_is_tolerated(&u, &c));
     }
 
     #[test]
-    fn panic_is_never_tolerated() {
-        // A crash surfaces even against a tolerated `Unsupported`.
+    fn two_panics_are_treated_as_agreement() {
         let p = errored(FailureKind::Panic);
-        let u = errored(FailureKind::Unsupported {
-            construct: "intrinsic".to_string(),
-        });
-        assert!(outcomes_equivalent(&p, &u).is_err());
-        assert!(!outcome_is_tolerated(&p, &u));
+        assert!(outcomes_equivalent(&p, &p).is_ok());
+        assert!(!outcome_is_tolerated(&p, &p));
+    }
+
+    #[test]
+    fn panic_is_never_tolerated() {
+        let p = errored(FailureKind::Panic);
+        for gap in [unsupported(), errored(FailureKind::DependencyCompileGap)] {
+            assert!(outcomes_equivalent(&p, &gap).is_err());
+            assert!(!outcome_is_tolerated(&p, &gap));
+            assert!(outcomes_equivalent(&gap, &p).is_err());
+            assert!(!outcome_is_tolerated(&gap, &p));
+        }
     }
 
     #[test]

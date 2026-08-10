@@ -1,6 +1,4 @@
-//! Test-support: drive Noir's frontend to a monomorphized AST for the interpreter to validate.
-//! Under `goldilocks`, dependency-only elaboration errors are tolerated until the crypto stdlib
-//! supports the smaller field.
+//! Test support for producing a monomorphized Noir AST while tracking dependency diagnostics.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,14 +25,28 @@ pub(crate) struct Validated {
     pub abi: Abi,
 }
 
-/// A failure of the validation frontend. The message is human-readable; tests match on its
-/// content (e.g. the tolerated-file rejection contains "failed elaboration").
+/// A validation frontend failure with a human-readable diagnostic.
 #[derive(Debug)]
-pub(crate) struct ValidationError(pub String);
+pub(crate) enum ValidationError {
+    Compile(String),
+    DependencyCompileGap(String),
+}
+
+impl ValidationError {
+    fn message(&self) -> &str {
+        match self {
+            ValidationError::Compile(m) | ValidationError::DependencyCompileGap(m) => m,
+        }
+    }
+
+    pub(crate) fn is_dependency_compile_gap(&self) -> bool {
+        matches!(self, ValidationError::DependencyCompileGap(_))
+    }
+}
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.message())
     }
 }
 
@@ -62,12 +74,12 @@ pub(crate) fn compile_for_validation(
 
     let main = context
         .get_main_function(context.root_crate_id())
-        .ok_or_else(|| ValidationError("expected a `main` function to validate".to_string()))?;
+        .ok_or_else(|| {
+            ValidationError::Compile("expected a `main` function to validate".to_string())
+        })?;
     let debug_type_tracker =
         DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
-    // beta.22: `Monomorphizer::new` gained a `&FileMap` (arg 2) and an `Option<CrateId>`
-    // `debug_crate_id` (arg 4); pass the crate's file map and `None`, matching Noir's own
-    // non-debug `monomorphize` entry point.
+    // Match Noir's non-debug monomorphization entry point.
     let mut monomorphizer = Monomorphizer::new(
         &mut context.def_interner,
         context.file_manager.as_file_map(),
@@ -77,10 +89,10 @@ pub(crate) fn compile_for_validation(
     );
     monomorphizer
         .compile_main(main)
-        .map_err(|e| ValidationError(format!("{e:?}")))?;
+        .map_err(|e| ValidationError::Compile(format!("{e:?}")))?;
     monomorphizer
         .process_queue()
-        .map_err(|e| ValidationError(format!("{e:?}")))?;
+        .map_err(|e| ValidationError::Compile(format!("{e:?}")))?;
     reject_code_from_tolerated_files(&context.file_manager, &monomorphizer, &tolerated_files)?;
     let program = monomorphizer.into_program();
 
@@ -94,15 +106,8 @@ pub(crate) fn compile_for_validation(
     Ok(Validated { program, abi })
 }
 
-/// Handle the whole-crate `check_crate` result, returning the set of files whose elaboration errors
-/// were *tolerated*.
-///
-/// Under `goldilocks` the auto-injected bn254 crypto stdlib does not type-check (254-bit `Field`
-/// constants, values >= p), so errors in any file outside the user's package (the stdlib, or a
-/// broken dependency) are tolerated and their files returned; errors in the package stay fatal.
-/// Tolerance is only sound together with [`reject_code_from_tolerated_files`]: most type errors
-/// leave the wrongly-typed expression in the HIR rather than an `Error` node, so reached broken
-/// code could otherwise monomorphize *silently* into a wrong AST. Under bn254 the set is empty.
+/// Return dependency files with tolerated diagnostics. Package diagnostics remain fatal, and
+/// callers must reject monomorphized code originating from a tolerated file.
 #[cfg_attr(not(feature = "goldilocks"), allow(unused_variables))]
 fn tolerated_dependency_error_files(
     context: &Context,
@@ -114,36 +119,27 @@ fn tolerated_dependency_error_files(
         #[cfg(feature = "goldilocks")]
         Err(diagnostics) => {
             let package_files = context.crate_files(&crate_id);
-            // `is_bug()` diagnostics (frontend ICEs) are treated like errors: fatal in the
-            // package, tolerated-but-tracked in dependencies — silently proceeding past an ICE
-            // is the one thing worse than failing on it.
+            // Track dependency ICEs too; proceeding past an untracked ICE is unsound.
             let (package_errors, tolerated): (Vec<_>, Vec<_>) = diagnostics
                 .into_iter()
                 .filter(|d| d.is_error() || d.is_bug())
                 .partition(|d| package_files.contains(&d.file));
             if !package_errors.is_empty() {
-                return Err(ValidationError(format!(
+                return Err(ValidationError::Compile(format!(
                     "Noir compiler error: {package_errors:?}"
                 )));
             }
             Ok(tolerated.into_iter().map(|d| d.file).collect())
         }
         #[cfg(not(feature = "goldilocks"))]
-        Err(diagnostics) => Err(ValidationError(format!(
+        Err(diagnostics) => Err(ValidationError::Compile(format!(
             "Noir compiler error: {diagnostics:?}"
         ))),
     }
 }
 
-/// Reject a monomorphized program containing code from any file whose elaboration errors were
-/// tolerated by [`tolerated_dependency_error_files`]. Such code may be silently mistyped, so failing
-/// loudly here is what makes the tolerance sound.
-///
-/// The monomorphizer records the defining file of every function, global, and trait constant it
-/// lowers, so the mono-AST provably contains no *code or inlined constant* from a failed file.
-/// Values folded during elaboration itself (a dependency global used as an array length, comptime
-/// evaluation) leave no trace here — a residual risk until the stdlib port removes the tolerated
-/// errors entirely.
+/// Reject monomorphized code from dependencies whose diagnostics were tolerated. Constants folded
+/// during elaboration remain outside this provenance check.
 fn reject_code_from_tolerated_files(
     file_manager: &FileManager,
     monomorphizer: &Monomorphizer,
@@ -161,9 +157,9 @@ fn reject_code_from_tolerated_files(
     if poisoned.is_empty() {
         return Ok(());
     }
-    Err(ValidationError(format!(
-        "program reaches code from files that failed elaboration under the chosen field (porting \
-         them is the stdlib-port work): {}",
+    Err(ValidationError::DependencyCompileGap(format!(
+        "program reaches dependency code from files that failed elaboration under the chosen \
+         field: {}",
         poisoned.join(", ")
     )))
 }
