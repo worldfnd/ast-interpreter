@@ -437,8 +437,12 @@ fn field_tag() -> &'static str {
     }
 }
 
+fn target_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target")
+}
+
 fn dump_path(tag: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../target/cross_field_{tag}.json"))
+    target_dir().join(format!("cross_field_{tag}.json"))
 }
 
 /// `git rev-parse HEAD` in `dir`, or "unknown" when git is unavailable.
@@ -491,6 +495,7 @@ fn noir_rev() -> String {
 fn dump_corpus_outcomes() {
     let corpus = corpus_dir();
     assert!(corpus.is_dir(), "corpus not found at {}", corpus.display());
+    std::fs::create_dir_all(target_dir()).expect("create target dir for the dump");
 
     let mut outcomes: Vec<(String, DiffOutcome)> = Vec::new();
     for entry in std::fs::read_dir(&corpus).unwrap() {
@@ -536,7 +541,8 @@ fn dump_corpus_outcomes() {
     assert_eq!(restored, dump, "dump must round-trip through JSON");
 
     let path = dump_path(field_tag());
-    std::fs::write(&path, &json).unwrap();
+    std::fs::write(&path, &json)
+        .unwrap_or_else(|e| panic!("failed to write the dump to {}: {e}", path.display()));
     println!(
         "wrote {} outcomes ({returned} returned a value) for field '{}' to {}",
         dump.outcomes.len(),
@@ -572,11 +578,13 @@ fn write_cross_field_report(
     missing: &[String],
 ) {
     use std::collections::BTreeMap;
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
-    let _ = std::fs::write(
+    let dir = target_dir();
+    std::fs::create_dir_all(&dir).expect("create target dir for the report");
+    std::fs::write(
         dir.join("cross_field_report.json"),
-        serde_json::to_string_pretty(divergences).unwrap_or_default(),
-    );
+        serde_json::to_string_pretty(divergences).expect("serialize cross-field divergences"),
+    )
+    .expect("write cross_field_report.json");
 
     let mut by_bucket: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (name, bucket, reason) in divergences {
@@ -605,7 +613,7 @@ fn write_cross_field_report(
         }
         md.push('\n');
     }
-    let _ = std::fs::write(dir.join("cross_field_report.md"), md);
+    std::fs::write(dir.join("cross_field_report.md"), md).expect("write cross_field_report.md");
 }
 
 /// Cross-field differential, step 2: diff the two field dumps. Integer/struct values must match;
