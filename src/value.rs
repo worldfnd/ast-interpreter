@@ -133,7 +133,7 @@ impl Value {
         match self {
             Value::Tuple(cells) => cells
                 .get(i)
-                .map(|c| c.borrow().clone().deep_copy())
+                .map(|c| c.borrow().deep_copy())
                 .ok_or_else(|| InterpretError::Type(format!("tuple field {i} out of bounds"))),
             Value::Ref(cell, _) => cell.borrow().tuple_field(i),
             other => Err(InterpretError::Type(format!(
@@ -146,7 +146,7 @@ impl Value {
     /// multi-level) — tolerated as `Unsupported`, not a miscompile.
     pub fn deref(&self) -> Result<Value, InterpretError> {
         match self {
-            Value::Ref(cell, _) => Ok(cell.borrow().clone().deep_copy()),
+            Value::Ref(cell, _) => Ok(cell.borrow().deep_copy()),
             other => Err(InterpretError::Unsupported(format!(
                 "dereference of a non-reference value ({other:?})"
             ))),
@@ -154,19 +154,18 @@ impl Value {
     }
 
     /// Replace every shared cell (in tuples, and through arrays) with a fresh one, so a value read
-    /// never aliases a binding. `Ref` keeps its cell — references are meant to share.
-    pub fn deep_copy(self) -> Value {
+    /// never aliases a binding. `Ref` keeps its cell — references are meant to share. Borrowing
+    /// receiver so hot read paths copy in a single traversal, without an intermediate clone.
+    pub fn deep_copy(&self) -> Value {
         match self {
             Value::Tuple(cells) => Value::Tuple(
                 cells
-                    .into_iter()
-                    .map(|c| Rc::new(RefCell::new(c.borrow().clone().deep_copy())))
+                    .iter()
+                    .map(|c| Rc::new(RefCell::new(c.borrow().deep_copy())))
                     .collect(),
             ),
-            Value::Array(elements) => {
-                Value::Array(elements.into_iter().map(Value::deep_copy).collect())
-            }
-            other => other,
+            Value::Array(elements) => Value::Array(elements.iter().map(Value::deep_copy).collect()),
+            other => other.clone(),
         }
     }
 
