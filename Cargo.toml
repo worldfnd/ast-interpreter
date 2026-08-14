@@ -9,6 +9,7 @@ acvm.workspace = true
 noirc_abi.workspace = true
 noirc_errors.workspace = true
 noirc_frontend.workspace = true
+noirc_printable_type.workspace = true
 
 # `DiffValue` serializes `BigInt` payloads in dump JSON.
 num-bigint = { version = "0.4", features = ["serde"] }
@@ -72,6 +73,7 @@ noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1
 noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_driver" }
 noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_errors" }
 noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_frontend" }
+noirc_printable_type = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_printable_type" }
 
 # Shared crates.
 serde = { version = "1.0.204", features = ["derive"] }

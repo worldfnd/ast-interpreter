@@ -8,10 +8,12 @@ use num_traits::Zero;
 use noirc_errors::Location;
 use noirc_frontend::ast::{BinaryOpKind, UnaryOp};
 use noirc_frontend::hir_def::expr::Constructor;
+use noirc_frontend::hir_def::types::Type as HirType;
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, GlobalId, LValue, Literal, MatchCase, Type,
 };
 use noirc_frontend::token::FmtStrFragment;
+use noirc_printable_type::PrintableType;
 
 use super::error::InterpretError;
 use super::value::{IntValue, Value, field_to_bigint};
@@ -61,7 +63,7 @@ impl<'p> Interpreter<'p> {
                     })?;
                     match value {
                         // Load a mutable slot; both arms `deep_copy` so a read never aliases.
-                        Value::Ref(cell, true) => cell.borrow().clone().deep_copy(),
+                        Value::Ref(cell, true) => cell.borrow().deep_copy(),
                         other => other.deep_copy(),
                     }
                 }
@@ -231,7 +233,7 @@ impl<'p> Interpreter<'p> {
             Expression::Constrain(condition, location, message) => {
                 if !self.eval_expr_value(condition, env)?.as_bool()? {
                     let message = match message {
-                        Some(boxed) => self.render_assert_message(&boxed.0, env),
+                        Some(boxed) => self.render_assert_message(&boxed.0, &boxed.1, env),
                         None => None,
                     };
                     return Err(InterpretError::AssertionFailed {
@@ -310,7 +312,7 @@ impl<'p> Interpreter<'p> {
     /// interpreter does not yet support, so they stay lazy.
     fn eval_global(&mut self, id: GlobalId) -> Result<Value, InterpretError> {
         match self.globals.get(&id) {
-            Some(GlobalState::Done(value)) => return Ok(value.clone()),
+            Some(GlobalState::Done(value)) => return Ok(value.deep_copy()),
             Some(GlobalState::InProgress) => {
                 return Err(InterpretError::Internal(format!(
                     "global {id:?} is defined in terms of itself"
@@ -332,7 +334,8 @@ impl<'p> Interpreter<'p> {
                 return Err(e);
             }
         };
-        self.globals.insert(id, GlobalState::Done(value.clone()));
+        self.globals
+            .insert(id, GlobalState::Done(value.deep_copy()));
         Ok(value)
     }
 
@@ -377,17 +380,21 @@ impl<'p> Interpreter<'p> {
                 element, length, ..
             } => {
                 let value = self.eval_expr_value(element, env)?;
-                Value::Array(vec![value; *length as usize])
+                Value::Array(
+                    std::iter::repeat_with(|| value.deep_copy())
+                        .take(*length as usize)
+                        .collect(),
+                )
             }
             Literal::FmtStr(fragments, _count, captures) => {
-                // Decline a `Field` interpolation: it renders field-specifically, breaking the diff.
                 let values = self.eval_fmt_captures(captures, env)?;
                 if values.iter().any(contains_field) {
                     return Err(InterpretError::Unsupported(
                         "format string interpolating a field".to_string(),
                     ));
                 }
-                Value::Str(format_fmt_str(fragments, &values)?)
+                let types = capture_types(captures)?;
+                Value::Str(format_fmt_str(fragments, &values, &types)?)
             }
         };
         Ok(value)
@@ -502,8 +509,7 @@ impl<'p> Interpreter<'p> {
         }
     }
 
-    // `pub(crate)` so the `unsafe_cast` intrinsic can reuse the Field->int truncation.
-    pub(crate) fn eval_cast(&self, value: Value, target: &Type) -> Result<Value, InterpretError> {
+    fn eval_cast(&self, value: Value, target: &Type) -> Result<Value, InterpretError> {
         match target {
             Type::Field => match value {
                 // Noir rejects signed-to-Field casts at type-check (`UnsupportedFieldCast`);
@@ -555,10 +561,19 @@ impl<'p> Interpreter<'p> {
 
     /// Render an assertion's failure message. A format string is rendered even when it interpolates
     /// a `Field` — the message is triage text, never compared.
-    fn render_assert_message(&mut self, expr: &'p Expression, env: &mut Frame) -> Option<String> {
+    fn render_assert_message(
+        &mut self,
+        expr: &'p Expression,
+        typ: &HirType,
+        env: &mut Frame,
+    ) -> Option<String> {
         if let Expression::Literal(Literal::FmtStr(fragments, _count, captures)) = expr {
             let values = self.eval_fmt_captures(captures, env).ok()?;
-            return format_fmt_str(fragments, &values).ok();
+            let PrintableType::FmtString { typ, .. } = PrintableType::from(typ) else {
+                return None;
+            };
+            let types = printable_capture_types(*typ)?;
+            return format_fmt_str(fragments, &values, &types).ok();
         }
         match self.eval_expr_value(expr, env) {
             Ok(Value::Str(s)) => Some(s),
@@ -573,10 +588,7 @@ impl<'p> Interpreter<'p> {
         env: &mut Frame,
     ) -> Result<Vec<Value>, InterpretError> {
         match self.eval_expr_value(captures, env)? {
-            Value::Tuple(cells) => Ok(cells
-                .iter()
-                .map(|c| c.borrow().clone().deep_copy())
-                .collect()),
+            Value::Tuple(cells) => Ok(cells.iter().map(|c| c.borrow().deep_copy()).collect()),
             other => Err(InterpretError::Internal(format!(
                 "fmt captures were not a tuple: {other:?}"
             ))),
@@ -608,12 +620,19 @@ impl<'p> Interpreter<'p> {
                 })?;
                 Ok(Value::Ref(cell, true))
             }
-            // `&mut arr[i]` is rejected by Noir's own compiler on the pinned branch, so it never
-            // reaches the interpreter; this stays only as a defensive guard.
-            Expression::Index(_) => Err(InterpretError::Unsupported(
-                "reference to an array element".to_string(),
-            )),
-            // `&(non-place expr)`: the `Reference` arm boxes the value in a fresh cell.
+            Expression::Unary(unary) if matches!(unary.operator, UnaryOp::Dereference { .. }) => {
+                if unary.skip {
+                    return self.eval_place(&unary.rhs, env);
+                }
+                match self.eval_expr_value(&unary.rhs, env)? {
+                    Value::Ref(cell, _) => Ok(Value::Ref(cell, true)),
+                    other => Err(InterpretError::Unsupported(format!(
+                        "dereference of a non-reference value ({other:?})"
+                    ))),
+                }
+            }
+            // `&(non-place expr)`, including immutable `&arr[i]` (Noir snapshots the element; the
+            // mutable form is compiler-rejected): the `Reference` arm boxes the value in a fresh cell.
             _ => self.eval_expr_value(expr, env),
         }
     }
@@ -740,15 +759,19 @@ impl<'p> Interpreter<'p> {
                         InterpretError::Type(format!("field {field_index} out of bounds in lvalue"))
                     })
             }
-            LValue::Index { array, index, .. } => {
+            LValue::Index {
+                array,
+                index,
+                location,
+                ..
+            } => {
+                let array = self.lvalue_value(array, env)?;
                 let i = self.eval_expr_value(index, env)?.as_index()?;
-                match self.lvalue_value(array, env)? {
-                    Value::Array(elements) => elements.get(i).cloned().ok_or_else(|| {
-                        InterpretError::Type(format!(
-                            "index {i} out of bounds (len {}) in lvalue",
-                            elements.len()
-                        ))
-                    }),
+                match array {
+                    Value::Array(elements) => elements
+                        .get(i)
+                        .cloned()
+                        .ok_or_else(|| index_out_of_bounds(*location, i, elements.len())),
                     other => Err(InterpretError::Type(format!(
                         "cannot index {other:?} in lvalue"
                     ))),
@@ -854,63 +877,236 @@ fn same_aggregate_shape(a: &Value, b: &Value) -> bool {
     )
 }
 
-/// Render a format string by interleaving its literal fragments with the rendered capture values.
+fn capture_types(captures: &Expression) -> Result<Vec<PrintableType>, InterpretError> {
+    let Type::Tuple(types) =
+        captures.return_type().as_deref().cloned().ok_or_else(|| {
+            InterpretError::Internal("fmt captures have no return type".to_string())
+        })?
+    else {
+        return Err(InterpretError::Internal(
+            "fmt captures do not have a tuple type".to_string(),
+        ));
+    };
+    if types.iter().any(type_contains_erased_aggregate) {
+        return Err(InterpretError::Unsupported(
+            "format string interpolating an aggregate with erased type metadata".to_string(),
+        ));
+    }
+    Ok(types.iter().map(printable_type).collect())
+}
+
+fn type_contains_erased_aggregate(typ: &Type) -> bool {
+    match typ {
+        Type::Tuple(_) => true,
+        Type::Array(_, element) | Type::Vector(element) | Type::Reference(element, _) => {
+            type_contains_erased_aggregate(element)
+        }
+        Type::Function(arguments, return_type, environment, _) => {
+            arguments.iter().any(type_contains_erased_aggregate)
+                || type_contains_erased_aggregate(return_type)
+                || type_contains_erased_aggregate(environment)
+        }
+        Type::Field
+        | Type::Integer(..)
+        | Type::Bool
+        | Type::String(_)
+        | Type::FmtString(..)
+        | Type::Unit => false,
+    }
+}
+
+fn printable_capture_types(typ: PrintableType) -> Option<Vec<PrintableType>> {
+    match typ {
+        PrintableType::Tuple { types } => Some(types),
+        PrintableType::Unit => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn printable_type(typ: &Type) -> PrintableType {
+    match typ {
+        Type::Field => PrintableType::Field,
+        Type::Array(length, element) => PrintableType::Array {
+            length: *length,
+            typ: Box::new(printable_type(element)),
+        },
+        Type::Integer(signedness, bits) if signedness.is_signed() => PrintableType::SignedInteger {
+            width: bits.bit_size().into(),
+        },
+        Type::Integer(_, bits) => PrintableType::UnsignedInteger {
+            width: bits.bit_size().into(),
+        },
+        Type::Bool => PrintableType::Boolean,
+        Type::String(length) => PrintableType::String { length: *length },
+        Type::FmtString(length, captures) => PrintableType::FmtString {
+            length: *length,
+            typ: Box::new(printable_type(captures)),
+        },
+        Type::Unit => PrintableType::Unit,
+        Type::Tuple(types) => PrintableType::Tuple {
+            types: types.iter().map(printable_type).collect(),
+        },
+        Type::Vector(element) => PrintableType::Vector {
+            typ: Box::new(printable_type(element)),
+        },
+        Type::Reference(element, mutable) => PrintableType::Reference {
+            typ: Box::new(printable_type(element)),
+            mutable: *mutable,
+        },
+        Type::Function(arguments, return_type, environment, unconstrained) => {
+            PrintableType::Function {
+                arguments: arguments.iter().map(printable_type).collect(),
+                return_type: Box::new(printable_type(return_type)),
+                env: Box::new(printable_type(environment)),
+                unconstrained: *unconstrained,
+            }
+        }
+    }
+}
+
 fn format_fmt_str(
     fragments: &[FmtStrFragment],
     values: &[Value],
+    types: &[PrintableType],
 ) -> Result<String, InterpretError> {
+    if values.len() != types.len() {
+        return Err(InterpretError::Internal(format!(
+            "fmt-string has {} captures but {} capture types",
+            values.len(),
+            types.len()
+        )));
+    }
     let mut out = String::new();
-    let mut next = values.iter();
+    let mut next = values.iter().zip(types);
     for fragment in fragments {
         match fragment {
             FmtStrFragment::String(s) => out.push_str(s),
             FmtStrFragment::Interpolation(..) => {
-                let value = next.next().ok_or_else(|| {
+                let (value, typ) = next.next().ok_or_else(|| {
                     InterpretError::Internal(
                         "fmt-string has more interpolations than captures".to_string(),
                     )
                 })?;
-                out.push_str(&format_value(value));
+                out.push_str(&format_value(value, typ)?);
             }
         }
+    }
+    if next.next().is_some() {
+        return Err(InterpretError::Internal(
+            "fmt-string has fewer interpolations than captures".to_string(),
+        ));
     }
     Ok(out)
 }
 
-/// Render a value for a format string. A `Field` renders field-specifically, so it is only reached
-/// from an assertion message (which is never compared).
-fn format_value(value: &Value) -> String {
-    match value {
-        Value::Int(i) => i.value.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Str(s) => s.clone(),
-        Value::Unit => "()".to_string(),
-        Value::Field(f) => field_to_bigint(f).to_string(),
-        Value::Array(xs) => format!(
-            "[{}]",
-            xs.iter().map(format_value).collect::<Vec<_>>().join(", ")
-        ),
-        Value::Tuple(cells) => format!(
-            "({})",
-            cells
+fn format_value(value: &Value, typ: &PrintableType) -> Result<String, InterpretError> {
+    let mismatch = || {
+        InterpretError::Type(format!(
+            "cannot format value {value:?} as printable type {typ:?}"
+        ))
+    };
+    match (value, typ) {
+        (Value::Field(field), PrintableType::Field) => Ok(field.to_short_hex()),
+        (Value::Int(int), PrintableType::SignedInteger { .. })
+        | (Value::Int(int), PrintableType::UnsignedInteger { .. }) => Ok(int.value.to_string()),
+        (Value::Bool(value), PrintableType::Boolean) => Ok(value.to_string()),
+        (Value::Str(value), PrintableType::String { .. } | PrintableType::FmtString { .. }) => {
+            Ok(value.clone())
+        }
+        (Value::Unit, PrintableType::Unit) => Ok("()".to_string()),
+        (Value::Array(values), PrintableType::Array { typ, .. }) => {
+            format_sequence(values, typ, "[", "]")
+        }
+        (Value::Array(values), PrintableType::Vector { typ }) => {
+            format_sequence(values, typ, "@[", "]")
+        }
+        (Value::Tuple(cells), PrintableType::Tuple { types }) if cells.len() == types.len() => {
+            let mut values = cells
                 .iter()
-                .map(|c| format_value(&c.borrow()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Value::Function(_) => "<function>".to_string(),
-        Value::Ref(cell, _) => format_value(&cell.borrow()),
+                .zip(types)
+                .map(|(cell, typ)| format_value(&cell.borrow(), typ))
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.len() == 1 {
+                values[0].push(',');
+            }
+            Ok(format!("({})", values.join(", ")))
+        }
+        (Value::Tuple(cells), PrintableType::Struct { name, fields })
+            if cells.len() == fields.len() =>
+        {
+            let fields = cells
+                .iter()
+                .zip(fields)
+                .map(|(cell, (field_name, typ))| {
+                    Ok(format!(
+                        "{field_name}: {}",
+                        format_value(&cell.borrow(), typ)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, InterpretError>>()?;
+            Ok(format!("{name} {{ {} }}", fields.join(", ")))
+        }
+        (Value::Tuple(cells), PrintableType::Enum { name, variants }) => {
+            let tag_cell = cells.first().ok_or_else(mismatch)?.borrow();
+            // The tag is always a `Field` (`case_matches` rejects anything else); `field_to_bigint`
+            // avoids `to_u128`'s panic on an oversized tag.
+            let tag = match &*tag_cell {
+                Value::Field(tag) => {
+                    usize::try_from(field_to_bigint(tag)).map_err(|_| mismatch())?
+                }
+                _ => return Err(mismatch()),
+            };
+            drop(tag_cell);
+            let (variant_name, types) = variants.get(tag).ok_or_else(mismatch)?;
+            let Value::Tuple(values) = &*cells.get(tag + 1).ok_or_else(mismatch)?.borrow() else {
+                return Err(mismatch());
+            };
+            if values.len() != types.len() {
+                return Err(mismatch());
+            }
+            let values = values
+                .iter()
+                .zip(types)
+                .map(|(cell, typ)| format_value(&cell.borrow(), typ))
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.is_empty() {
+                Ok(format!("{name}::{variant_name}"))
+            } else {
+                Ok(format!("{name}::{variant_name}({})", values.join(", ")))
+            }
+        }
+        (Value::Function(_), PrintableType::Function { .. }) => Ok(format!("<<{typ}>>")),
+        (Value::Ref(_, _), PrintableType::Reference { mutable: true, .. }) => {
+            Ok("<<mutable ref>>".to_string())
+        }
+        (Value::Ref(_, _), PrintableType::Reference { mutable: false, .. }) => {
+            Ok("<<ref>>".to_string())
+        }
+        (Value::Ref(cell, _), _) => format_value(&cell.borrow(), typ),
+        _ => Err(mismatch()),
     }
 }
 
-/// Whether a value contains a `Field` anywhere (which would make a materialized `FmtStr` field-specific).
+fn format_sequence(
+    values: &[Value],
+    typ: &PrintableType,
+    open: &str,
+    close: &str,
+) -> Result<String, InterpretError> {
+    let values = values
+        .iter()
+        .map(|value| format_value(value, typ))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("{open}{}{close}", values.join(", ")))
+}
+
 fn contains_field(value: &Value) -> bool {
     match value {
         Value::Field(_) => true,
-        Value::Array(xs) => xs.iter().any(contains_field),
-        Value::Tuple(cells) => cells.iter().any(|c| contains_field(&c.borrow())),
+        Value::Array(values) => values.iter().any(contains_field),
+        Value::Tuple(cells) => cells.iter().any(|cell| contains_field(&cell.borrow())),
         Value::Ref(cell, _) => contains_field(&cell.borrow()),
-        _ => false,
+        Value::Int(_) | Value::Bool(_) | Value::Unit | Value::Str(_) | Value::Function(_) => false,
     }
 }
 
@@ -925,7 +1121,7 @@ fn case_matches(constructor: &Constructor, scrutinee: &Value) -> Result<bool, In
         Constructor::False => Ok(!scrutinee.as_bool()?),
         // Matching on a `Field` is legal (e.g. `match x { 1 => .. }`), so compare its value.
         Constructor::Int(want) => match scrutinee {
-            Value::Field(f) => Ok(&field_to_bigint(f) == want),
+            Value::Field(f) => Ok(f == &bigint_to_field(want)),
             _ => Ok(&scrutinee.as_int()?.value == want),
         },
         Constructor::Variant(_, index) => {
@@ -998,7 +1194,7 @@ fn bind_case_arguments(
         )));
     }
     for ((arg, _name), cell) in case.arguments.iter().zip(&payload_cells) {
-        env.insert(*arg, cell.borrow().clone().deep_copy());
+        env.insert(*arg, cell.borrow().deep_copy());
     }
     Ok(())
 }
@@ -1280,10 +1476,35 @@ mod semantics_tests {
 #[cfg(test)]
 mod aggregate_and_fmt_tests {
     use super::*;
-    use acvm::FieldElement;
+    use noirc_frontend::ast::IntegerBitSize;
+    use noirc_frontend::monomorphization::ast::{Assign, Ident, IdentId, LocalId, Program};
+    use noirc_frontend::shared::Signedness;
 
     fn i32v(n: i128) -> Value {
         Value::Int(IntValue::canonical(true, 32, BigInt::from(n)))
+    }
+
+    fn u32v(n: u32) -> Value {
+        Value::Int(IntValue::canonical(false, 32, BigInt::from(n)))
+    }
+
+    fn ident(local: LocalId, name: &str, typ: Type, id: u32) -> Ident {
+        Ident {
+            location: None,
+            definition: Definition::Local(local),
+            mutable: true,
+            name: name.to_string(),
+            typ: Rc::new(typ),
+            id: IdentId(id),
+        }
+    }
+
+    fn u32_literal(n: u32, typ: &Type) -> Expression {
+        Expression::Literal(Literal::Integer(
+            BigInt::from(n),
+            typ.clone(),
+            Location::dummy(),
+        ))
     }
 
     #[test]
@@ -1309,28 +1530,69 @@ mod aggregate_and_fmt_tests {
     }
 
     #[test]
-    fn format_value_renders_scalars_field_independently() {
-        assert_eq!(format_value(&i32v(-7)), "-7");
-        assert_eq!(format_value(&Value::Bool(true)), "true");
-        assert_eq!(
-            format_value(&Value::Array(vec![i32v(1), i32v(2)])),
-            "[1, 2]"
+    fn nested_lvalue_indices_evaluate_inner_first() {
+        let u32_type = Type::Integer(Signedness::Unsigned, IntegerBitSize::ThirtyTwo);
+        let row_type = Type::Array(2, Rc::new(u32_type.clone()));
+        let array_type = Type::Array(2, Rc::new(row_type.clone()));
+        let array_local = LocalId(0);
+        let index_local = LocalId(1);
+        let array_ident = ident(array_local, "array", array_type, 0);
+        let index_ident = ident(index_local, "index", u32_type.clone(), 1);
+
+        let inner_index = Expression::Block(vec![
+            Expression::Assign(Assign {
+                lvalue: LValue::Ident(index_ident.clone()),
+                expression: Box::new(u32_literal(1, &u32_type)),
+            }),
+            u32_literal(0, &u32_type),
+        ]);
+        let target = LValue::Index {
+            array: Box::new(LValue::Index {
+                array: Box::new(LValue::Ident(array_ident)),
+                index: Box::new(inner_index),
+                element_type: row_type,
+                location: Location::dummy(),
+            }),
+            index: Box::new(Expression::Ident(index_ident)),
+            element_type: u32_type,
+            location: Location::dummy(),
+        };
+
+        let index = Rc::new(RefCell::new(u32v(0)));
+        let mut env = Frame::new();
+        env.insert(
+            array_local,
+            Value::Array(vec![
+                Value::Array(vec![u32v(0), u32v(1)]),
+                Value::Array(vec![u32v(2), u32v(3)]),
+            ]),
         );
+        env.insert(index_local, Value::Ref(index.clone(), true));
+
+        let program = Program::default();
+        let mut interpreter = Interpreter::new(&program);
         assert_eq!(
-            format_value(&Value::tuple(vec![i32v(1), Value::Bool(false)])),
-            "(1, false)"
+            interpreter.lvalue_value(&target, &mut env).unwrap(),
+            u32v(1)
         );
+        assert_eq!(*index.borrow(), u32v(1));
     }
 
+    /// The shapes `renders_assert_message`'s end-to-end string does not already pin: a vector's
+    /// `@[..]` prefix and a negative signed integer.
     #[test]
-    fn contains_field_detects_a_nested_field() {
-        let f = Value::Field(FieldElement::from(3u128));
-        assert!(contains_field(&f));
-        assert!(contains_field(&Value::tuple(vec![i32v(1), f.clone()])));
-        assert!(contains_field(&Value::Array(vec![f])));
-        assert!(!contains_field(&Value::tuple(vec![
-            i32v(1),
-            Value::Bool(true)
-        ])));
+    fn format_value_uses_noir_display_rules() {
+        let i32_type = PrintableType::SignedInteger { width: 32 };
+        assert_eq!(format_value(&i32v(-7), &i32_type).unwrap(), "-7");
+        assert_eq!(
+            format_value(
+                &Value::Array(vec![i32v(1), i32v(2)]),
+                &PrintableType::Vector {
+                    typ: Box::new(i32_type)
+                }
+            )
+            .unwrap(),
+            "@[1, 2]"
+        );
     }
 }
