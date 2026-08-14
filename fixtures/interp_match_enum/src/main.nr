@@ -1,5 +1,3 @@
-// An enum match binds a variant's payload. The enum lowers to a `(tag, payload…)` tuple, so this
-// reuses the tuple machinery — no new value type.
 enum Shape {
     Circle(u32),
     Rect(u32, u32),

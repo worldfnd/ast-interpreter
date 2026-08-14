@@ -2,5 +2,6 @@
 name = "neg_assert_fmt_msg"
 type = "bin"
 authors = [""]
+compiler_unstable_features = ["enums"]
 
 [dependencies]

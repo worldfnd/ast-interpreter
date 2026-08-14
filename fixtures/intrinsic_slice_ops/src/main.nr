@@ -1,4 +1,3 @@
-// Pure slice builtins: length, push/pop at both ends, insert, remove. All field-independent.
 fn main() {
     let v: [u32] = [10, 20, 30].as_vector();
     assert(v.len() == 3);

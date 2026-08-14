@@ -1,6 +1,3 @@
-// Field decomposition with a small value (258 = 0x0102) and small N, so bn254 and Goldilocks agree:
-// the modulus-overflow guard never trips (N is well under both fields' byte/bit sizes). Drives
-// `to_radix`, `static_assert`, `is_unconstrained`, and the const-folded `modulus_*` builtins.
 fn main() {
     let x: Field = 258;
 

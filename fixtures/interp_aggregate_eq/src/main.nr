@@ -1,5 +1,3 @@
-// Structural equality on aggregates lowers to a derived `Eq::eq` call, not a primitive `==`, so it
-// runs through the normal function-call path and stays field-independent across bn254/Goldilocks.
 #[derive(Eq)]
 struct Point {
     x: u32,

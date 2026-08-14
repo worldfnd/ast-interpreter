@@ -1,7 +1,3 @@
-// A reference stored in a struct field. Taking `&mut holder.inner_ref.v` must peel through the
-// ref-typed field to reach the live cell, so mutating through it aliases the original `inner` and
-// leaves the sibling field untouched. This needs eval_place to follow more than one reference layer
-// (struct field -> `&mut Inner` -> field), the case the single-level place path used to reject.
 struct Inner {
     v: u32,
     w: u32,

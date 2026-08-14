@@ -1,5 +1,3 @@
-// A `&mut` reference threaded through a call chain: `main` -> `twice` -> `bump` all mutate the same
-// caller-owned cell.
 fn bump(r: &mut u64, by: u64) {
     *r = *r + by;
 }

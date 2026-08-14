@@ -1,6 +1,3 @@
-// Field-independent hint builtins that survive to a runtime call: `black_box` is the identity,
-// `as_witness` and `assert_constant` are no-ops. (`zeroed` is deliberately absent: the monomorphizer
-// const-folds it into a literal before the interpreter ever sees a call.)
 fn main() {
     let x: u32 = std::hint::black_box(7);
     assert(x == 7);

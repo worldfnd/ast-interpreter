@@ -1,6 +1,3 @@
-// Closures need no special handling: the monomorphizer lowers a closure call to extracting the
-// function from its `(env, fn)` tuple and prepending the captured environment, so the existing
-// tuple + call machinery runs them. Covers a lambda through a call, a capturing closure, and a HOF.
 fn apply(f: fn(u32) -> u32, x: u32) -> u32 {
     f(x)
 }

@@ -1,6 +1,0 @@
-[package]
-name = "neg_assert_fmt_field_msg"
-type = "bin"
-authors = [""]
-
-[dependencies]

@@ -1,6 +1,3 @@
-// Multiple reference levels to one cell. `q1` and `q2` are copies of the *same* inner `&mut`, so a
-// write through one is observed through the other. And a `&mut &mut` stored in a struct field must
-// deref twice to reach the underlying cell. Patterns lifted from the corpus `references` program.
 struct Nested {
     y: &mut &mut Field,
 }

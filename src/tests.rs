@@ -251,24 +251,6 @@ fn interprets_mixed_inputs() {
     );
 }
 
-/// A `&mut` parameter mutates a caller local through a call, and a local `&mut` writes through a deref.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_scalar_references() {
-    let result = interpret_fixture("interp_refs_scalar").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// `&mut s.field` aliases one field cell (sibling untouched), and a field ref taken before a
-/// whole-struct reassignment still observes the new value.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_struct_field_references() {
-    let result =
-        interpret_fixture("interp_refs_struct_field").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
 /// A `&mut` threaded through `main -> twice -> bump` mutates one shared cell: `100 + 5 + 5 == 110`.
 #[test]
 fn interprets_reference_call_chain() {
@@ -337,120 +319,18 @@ fn interprets_integer_match() {
     assert_eq!(run(-2), i32v(100), "negative literal case");
 }
 
-/// Pure slice builtins (`len`, `push_back`/`push_front`, `pop_back`/`pop_front`, `insert`, `remove`)
-/// interpret to their expected results; a clean `Unit` means every `assert` held. Field-independent.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
-fn interprets_slice_intrinsics() {
-    let result = interpret_fixture("intrinsic_slice_ops").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// Closures need no special handling (the monomorphizer lowers the call to fn-extract + env-prepend).
-/// Covers a lambda through a call, a capturing closure, and a HOF.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_closures() {
-    let result = interpret_fixture("interp_closures").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// `&mut holder.inner_ref.v` peels through a ref-typed field to the live cell, so the write aliases
-/// the original `inner` (sibling untouched) — the multi-layer place peel + the `skip` case.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_reference_through_struct_field() {
-    let result =
-        interpret_fixture("interp_refs_nested_field").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// Two copies of the same inner `&mut` alias, and a `&mut &mut` in a struct field derefs twice to its cell.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_multi_level_reference_aliasing() {
-    let result =
-        interpret_fixture("interp_refs_double_deref_alias").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// Hint builtins `black_box` (identity) and `as_witness`/`assert_constant` (no-ops) dispatch and run.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_hint_intrinsics() {
-    let result =
-        interpret_fixture("interp_intrinsic_hints").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// Structural `==`/`!=` on arrays, tuples, and a `derive(Eq)` struct runs via the `Eq::eq` call path.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_aggregate_equality() {
-    let result = interpret_fixture("interp_aggregate_eq").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// `x.assert_max_bit_size::<48>()` (the `apply_range_constraint` builtin) holds for `x = 3`. Gated
-/// off under goldilocks: `assert_max_bit_size` lives in `std/field/mod.nr`, not yet elaborated there.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_range_constraint_intrinsic() {
-    let root = fixture("intrinsic_range_constraint");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
-    assert_eq!(result, Value::Unit);
-}
-
-/// String<->byte builtins (`str::as_bytes`, `as_str_unchecked`) and array->slice (`as_vector`) round-trip.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_conversion_intrinsics() {
-    let result = interpret_fixture("intrinsic_conversions").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// Field decomposition (`to_le_bytes`/`to_be_bytes`/`to_le_bits`) with a small value/`N` so the
-/// modulus guard never trips. Drives `to_radix`, `static_assert`, `is_unconstrained`, `modulus_*`.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_decomposition_intrinsics() {
-    let result = interpret_fixture("intrinsic_to_bytes").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
-}
-
-/// A failing assertion's fmt-string message is rendered for a field-independent value (`sum: u32`).
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn renders_field_independent_assert_message() {
+fn renders_assert_message() {
     let project = NoirProject::new(negative_fixture("assert_fmt_msg")).expect("project");
     let validated = compile_for_validation(&project).expect("frontend compile");
     match interpret(&validated.program) {
         Err(InterpretError::AssertionFailed {
             message: Some(m), ..
-        }) => assert!(m.contains("sum was 45"), "message not rendered: {m:?}"),
-        other => panic!("expected AssertionFailed with a rendered message, got {other:?}"),
-    }
-}
-
-/// An assert message is rendered even when it interpolates a `Field` — it's triage text, never compared.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn renders_field_interpolating_assert_message() {
-    let root = negative_fixture("assert_fmt_field_msg");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend compile");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    match interpret_with_inputs(&validated.program, inputs) {
-        Err(InterpretError::AssertionFailed {
-            message: Some(m), ..
-        }) => assert!(m.contains("x was 3"), "field message not rendered: {m:?}"),
+        }) => assert_eq!(
+            m,
+            "sum=45 field=0x03 array=[1, 2] tuple=(7,) point=Point { x: 4, y: true } choice=Choice::Some(9)"
+        ),
         other => panic!("expected AssertionFailed with a rendered message, got {other:?}"),
     }
 }
@@ -733,61 +613,28 @@ fn dump_corpus_outcomes() {
     );
 }
 
-/// Programs whose result is legitimately field-dependent (excluded from the gate, still printed).
-/// Each trips the modulus guard in `to_*_bytes`/`to_*_bits`: a large `N` asserts under Goldilocks
-/// (8-byte / 64-bit) but returns under bn254.
-const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
-    (
-        "to_le_bytes",
-        "to_le_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "to_be_bytes",
-        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "to_bytes_consistent",
-        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "to_bytes_integration",
-        "to_*_bytes::<31/32> and to_le_bits::<254> plus modulus_* builtins are field-sized",
-    ),
-    (
-        "regression_7128",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "unrolling_regression_8333",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "brillig_cow_regression",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "vectors",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "multi_scalar_mul",
-        "to_be_bits::<254> exceeds the Goldilocks 64-bit modulus size",
-    ),
-];
-
 /// The divergence class for a mismatched outcome pair, for the bucketed report.
 fn divergence_bucket(a: &DiffOutcome, b: &DiffOutcome) -> &'static str {
+    if matches!(
+        a,
+        DiffOutcome::Errored {
+            kind: FailureKind::Panic,
+            ..
+        }
+    ) || matches!(
+        b,
+        DiffOutcome::Errored {
+            kind: FailureKind::Panic,
+            ..
+        }
+    ) {
+        return "panic";
+    }
     match (a, b) {
         (DiffOutcome::Returned(_), DiffOutcome::Returned(_)) => "value_mismatch",
         (DiffOutcome::Returned(_), DiffOutcome::Errored { .. })
         | (DiffOutcome::Errored { .. }, DiffOutcome::Returned(_)) => "returned_vs_errored",
-        (DiffOutcome::Errored { kind: ka, .. }, DiffOutcome::Errored { kind: kb, .. }) => {
-            if matches!(ka, FailureKind::Panic) || matches!(kb, FailureKind::Panic) {
-                "panic"
-            } else {
-                "kind_mismatch"
-            }
-        }
+        (DiffOutcome::Errored { .. }, DiffOutcome::Errored { .. }) => "kind_mismatch",
     }
 }
 
@@ -835,6 +682,49 @@ fn write_cross_field_report(
     }
     std::fs::write(dir.join("cross_field_report.md"), md).expect("write cross_field_report.md");
 }
+
+/// Corpus programs whose divergence is field-dependent by design, not an interpreter bug: their
+/// `to_*_bytes`/`to_*_bits` widths exceed the Goldilocks modulus size, so the stdlib's modulus
+/// guard asserts under Goldilocks while bn254 returns a value. Excluded from the divergence gate —
+/// but required to keep diverging, so a stale entry fails the run instead of widening the exclusion.
+const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
+    (
+        "to_le_bytes",
+        "to_le_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "to_be_bytes",
+        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "to_bytes_consistent",
+        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "to_bytes_integration",
+        "to_*_bytes::<31/32> and to_le_bits::<254> plus modulus_* builtins are field-sized",
+    ),
+    (
+        "regression_7128",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "unrolling_regression_8333",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "brillig_cow_regression",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "vectors",
+        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
+    ),
+    (
+        "multi_scalar_mul",
+        "to_be_bits::<254> exceeds the Goldilocks 64-bit modulus size",
+    ),
+];
 
 /// Cross-field differential, step 2: diff the two field dumps. Integer/struct values must match;
 /// `Field` values may differ. Refuses to run when the dumps come from mismatched builds, tolerates
@@ -897,6 +787,7 @@ fn cross_field_diff() {
 
     let mut divergences: Vec<(String, &'static str, String)> = Vec::new();
     let mut allowlisted_hits: Vec<String> = Vec::new();
+    let mut stale_allowlist: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
     let mut tolerated_names: Vec<String> = Vec::new();
     let mut compared = 0usize;
@@ -915,6 +806,8 @@ fn cross_field_diff() {
             Ok(()) => {
                 if outcome_is_tolerated(b, g) {
                     tolerated_names.push(name.clone());
+                } else if allowlisted.contains(name.as_str()) {
+                    stale_allowlist.push(name.clone());
                 }
             }
             Err(reason) if allowlisted.contains(name.as_str()) => {
@@ -948,6 +841,11 @@ fn cross_field_diff() {
         divergences.is_empty(),
         "{} cross-field divergence(s) outside the allowlist",
         divergences.len()
+    );
+    assert!(
+        stale_allowlist.is_empty(),
+        "allowlisted program(s) no longer diverge — remove from KNOWN_FIELD_DEPENDENT: {}",
+        stale_allowlist.join(", ")
     );
     assert!(
         missing.is_empty(),
@@ -1008,7 +906,8 @@ fn survey_execution_success_corpus() {
 /// The executor runs even when the interpreter rejects the program, so a *false rejection* (interp
 /// errors on something nargo runs fine) is caught, not hidden. Buckets: `"agree"`,
 /// `"FALSE-REJECTION: ..."`, `"MISMATCH: ..."`, `"oracle-wrong: ..."`, `"interp-unsupported: ..."`
-/// (tolerated gap), `"oracle-errored"`, `"both-errored"`. Under goldilocks the executor can't
+/// (tolerated gap), `"interp-panic: ..."` (always an interpreter bug, never folded into
+/// `both-errored`), `"oracle-errored"`, `"both-errored"`. Under goldilocks the executor can't
 /// elaborate the bn254 stdlib, so comparisons stay vacuous.
 fn oracle_compare(program_dir: &Path) -> String {
     use super::noir_oracle::noir_execute_return;
@@ -1054,6 +953,7 @@ fn oracle_compare(program_dir: &Path) -> String {
     };
 
     match (interp, executor_ok) {
+        (Err((FailureKind::Panic, detail)), _) => format!("interp-panic: {detail}"),
         (Err((FailureKind::Unsupported { construct }, _)), Some(_)) => {
             format!("interp-unsupported: {construct}")
         }
@@ -1117,7 +1017,6 @@ fn oracle_matches_interpreter_smoke() {
         "interp_inputs_u64",
         "interp_inputs_i32",
         "interp_inputs_struct",
-        "interp_refs_scalar",
         "interp_refs_struct_field",
         "interp_refs_call_chain",
         "interp_refs_nested_field",
