@@ -119,38 +119,44 @@ pub(crate) fn normalize_construct(msg: &str) -> String {
 }
 
 fn is_panic(outcome: &DiffOutcome) -> bool {
-    matches!(
-        outcome,
+    match outcome {
         DiffOutcome::Errored {
             kind: FailureKind::Panic,
             ..
-        }
-    )
+        } => true,
+        _ => false,
+    }
+}
+
+fn is_internal(outcome: &DiffOutcome) -> bool {
+    match outcome {
+        DiffOutcome::Errored {
+            kind: FailureKind::Internal,
+            ..
+        } => true,
+        _ => false,
+    }
 }
 
 /// Whether this outcome provides no executable result to compare.
 fn is_coverage_gap(outcome: &DiffOutcome) -> bool {
-    matches!(
-        outcome,
+    match outcome {
         DiffOutcome::Errored {
             kind: FailureKind::Unsupported { .. } | FailureKind::DependencyCompileGap,
             ..
-        }
-    )
+        } => true,
+        _ => false,
+    }
 }
 
 /// Compare cross-field outcomes, tolerating countable coverage gaps while rejecting value, error,
-/// and one-sided panic mismatches.
+/// panic, and internal outcomes.
 pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), String> {
     if is_panic(a) || is_panic(b) {
-        return match (a, b) {
-            (DiffOutcome::Errored { kind: ka, .. }, DiffOutcome::Errored { kind: kb, .. })
-                if ka == kb =>
-            {
-                Ok(())
-            }
-            _ => Err(format!("crash on one side: {a:?} vs {b:?}")),
-        };
+        return Err(format!("panic outcome: {a:?} vs {b:?}"));
+    }
+    if is_internal(a) || is_internal(b) {
+        return Err(format!("internal error outcome: {a:?} vs {b:?}"));
     }
 
     if is_coverage_gap(a) || is_coverage_gap(b) {
@@ -176,7 +182,11 @@ pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), Strin
 
 /// Whether equivalence depends on tolerating a coverage gap.
 pub fn outcome_is_tolerated(a: &DiffOutcome, b: &DiffOutcome) -> bool {
-    !is_panic(a) && !is_panic(b) && (is_coverage_gap(a) || is_coverage_gap(b))
+    !is_panic(a)
+        && !is_panic(b)
+        && !is_internal(a)
+        && !is_internal(b)
+        && (is_coverage_gap(a) || is_coverage_gap(b))
 }
 
 /// A dump's provenance, stamped when it is written so two dumps from mismatched builds are rejected
@@ -360,10 +370,18 @@ mod tests {
     }
 
     #[test]
-    fn two_panics_are_treated_as_agreement() {
+    fn two_panics_diverge() {
         let p = errored(FailureKind::Panic);
-        assert!(outcomes_equivalent(&p, &p).is_ok());
+        assert!(outcomes_equivalent(&p, &p).is_err());
         assert!(!outcome_is_tolerated(&p, &p));
+    }
+
+    #[test]
+    fn internal_errors_never_agree() {
+        let i = errored(FailureKind::Internal);
+        assert!(outcomes_equivalent(&i, &i).is_err());
+        assert!(outcomes_equivalent(&i, &unsupported()).is_err());
+        assert!(!outcome_is_tolerated(&i, &unsupported()));
     }
 
     #[test]
