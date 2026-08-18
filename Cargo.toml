@@ -1,0 +1,84 @@
+[package]
+name = "ast-interpreter"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Core Noir crates. They are pinned once below because `FieldElement` is compile-time global state.
+acvm.workspace = true
+noirc_abi.workspace = true
+noirc_errors.workspace = true
+noirc_frontend.workspace = true
+
+# `DiffValue` serializes `BigInt` payloads in dump JSON.
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = { version = "0.2" }
+serde = { workspace = true }
+
+# Optional integration oracle. Restore this dependency and feature forwarding when a matching branch
+# is available.
+# mavros-compiler = { git = "https://github.com/reilabs/mavros", branch = "<mavros-goldilocks-branch>", default-features = false, optional = true }
+
+[dev-dependencies]
+# Test package loading through stock Noir.
+nargo_toml.workspace = true
+fm.workspace = true
+nargo.workspace = true
+noirc_driver.workspace = true
+# Executor oracle used by tests.
+noirc_artifacts.workspace = true
+bn254_blackbox_solver.workspace = true
+serde_json = { version = "1.0" }
+tempfile.workspace = true
+# Randomized value-semantics tests.
+proptest = "1"
+
+[features]
+# Build the pinned Noir stack with Goldilocks.
+goldilocks = [
+    "noirc_frontend/goldilocks",
+    "noirc_driver/goldilocks",
+]
+
+# Integration oracle against the Mavros compiler. Fails to build with a clear message until the
+# mavros-compiler dependency is available; becomes ["dep:mavros-compiler"] then.
+mavros-oracle = []
+
+[lints]
+workspace = true
+
+# Single-crate workspace. Noir crates are pinned once so all `FieldElement` users share one source.
+[workspace]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Reilabs"]
+categories = ["compilers", "cryptography"]
+edition = "2024"
+keywords = ["cryptography", "spartan", "zero-knowledge"]
+license = "Apache-2.0"
+repository = "https://github.com/worldfnd/ast-interpreter"
+
+[workspace.dependencies]
+# The Noir crates, pinned to a single git revision so the interpreter and the compiler cannot drift
+# onto mismatched sources (the compiled-in field is a global).
+acvm = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "acvm" }
+bn254_blackbox_solver = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "bn254_blackbox_solver", default-features = false }
+fm = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "fm" }
+nargo = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "nargo" }
+nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_abi" }
+noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_artifacts" }
+noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "90b11f1431a69b4716775cbc84bcd367cd943422", package = "noirc_frontend" }
+
+# Shared crates.
+serde = { version = "1.0.204", features = ["derive"] }
+tempfile = { version = "3.19.1" }
+
+# Keep clippy defaults (correctness denied, perf/suspicious warned); only silence the two noisiest
+# groups so real bugs still surface.
+[workspace.lints.clippy]
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }

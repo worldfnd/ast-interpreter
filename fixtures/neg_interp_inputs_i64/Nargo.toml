@@ -1,0 +1,6 @@
+[package]
+name = "neg_interp_inputs_i64"
+type = "bin"
+authors = [""]
+
+[dependencies]
