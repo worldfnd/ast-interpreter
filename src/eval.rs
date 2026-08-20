@@ -58,7 +58,7 @@ impl<'p> Interpreter<'p> {
         let value = match expr {
             Expression::Ident(ident) => match &ident.definition {
                 Definition::Local(local) => {
-                    let value = env.get(local).cloned().ok_or_else(|| {
+                    let value = env.get(local).ok_or_else(|| {
                         InterpretError::Internal(format!("unbound local '{}'", ident.name))
                     })?;
                     match value {
@@ -101,8 +101,6 @@ impl<'p> Interpreter<'p> {
                     Value::Ref(cell, true) => Value::Ref(cell, false),
                     other => Value::Ref(Rc::new(RefCell::new(other)), false),
                 },
-                // A skipped deref (or other op) returns the operand unchanged.
-                _ if unary.skip => return self.eval(&unary.rhs, env),
                 UnaryOp::Dereference { .. } => self.eval_expr_value(&unary.rhs, env)?.deref()?,
                 _ => {
                     let rhs = self.eval_expr_value(&unary.rhs, env)?;
@@ -498,9 +496,8 @@ impl<'p> Interpreter<'p> {
                     "operator {op:?} not defined on bool"
                 ))),
             },
-            // Aggregate `==`/`Ord` lower to an `Eq::eq` call, never a primitive Binary, so a
-            // matching-shape pair here is a coverage gap — tolerate it. Ill-typed pairs stay loud.
-            (lhs, rhs) if same_aggregate_shape(&lhs, &rhs) => Err(InterpretError::Unsupported(
+            // Aggregate operators lower to trait calls, so a primitive `Binary` is invalid here.
+            (lhs, rhs) if same_aggregate_shape(&lhs, &rhs) => Err(InterpretError::Internal(
                 format!("binary {op:?} on aggregate operands (should lower to a trait-impl call)"),
             )),
             (lhs, rhs) => Err(InterpretError::Type(format!(
@@ -621,9 +618,6 @@ impl<'p> Interpreter<'p> {
                 Ok(Value::Ref(cell, true))
             }
             Expression::Unary(unary) if matches!(unary.operator, UnaryOp::Dereference { .. }) => {
-                if unary.skip {
-                    return self.eval_place(&unary.rhs, env);
-                }
                 match self.eval_expr_value(&unary.rhs, env)? {
                     Value::Ref(cell, _) => Ok(Value::Ref(cell, true)),
                     other => Err(InterpretError::Unsupported(format!(
@@ -683,11 +677,11 @@ impl<'p> Interpreter<'p> {
         match lvalue {
             LValue::Ident(ident) => match &ident.definition {
                 Definition::Local(local) => {
-                    let value = env.get(local).cloned().ok_or_else(|| {
+                    let value = env.get(local).ok_or_else(|| {
                         InterpretError::Internal("assignment to unbound local".to_string())
                     })?;
                     match value {
-                        Value::Ref(cell, _) => Ok(cell),
+                        Value::Ref(cell, _) => Ok(cell.clone()),
                         // A real constrained-`main` assignment target is always a mutable slot.
                         _ => Err(InterpretError::Internal(
                             "assignment to a non-mutable local".to_string(),
@@ -846,6 +840,7 @@ fn tuple_cells_of(value: Value) -> Result<Vec<Rc<RefCell<Value>>>, InterpretErro
 
 /// Write `rhs` into `target`. When both are tuples, write through the target's existing field cells
 /// rather than replacing them, so live `&mut field` references keep pointing at the new value.
+/// Value-position reads deep-copy tuple cells, so source and target cells normally do not alias.
 fn store_flattened(target: &Rc<RefCell<Value>>, rhs: Value) {
     let recursed = {
         let borrowed = target.borrow();
@@ -854,7 +849,8 @@ fn store_flattened(target: &Rc<RefCell<Value>>, rhs: Value) {
                 if target_cells.len() == rhs_cells.len() =>
             {
                 for (t, r) in target_cells.iter().zip(rhs_cells) {
-                    store_flattened(t, r.borrow().clone());
+                    let rhs = r.borrow().clone();
+                    store_flattened(t, rhs);
                 }
                 true
             }
@@ -1527,6 +1523,32 @@ mod aggregate_and_fmt_tests {
             &Value::Array(vec![]),
             &Value::tuple(vec![])
         ));
+    }
+
+    #[test]
+    fn primitive_binary_on_aggregate_is_an_internal_error() {
+        let program = Program::default();
+        let interpreter = Interpreter::new(&program);
+
+        assert!(matches!(
+            interpreter.eval_binary(
+                BinaryOpKind::Equal,
+                Value::Array(Vec::new()),
+                Value::Array(Vec::new())
+            ),
+            Err(InterpretError::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn flattened_store_allows_same_source_and_target_cell() {
+        let shared = Rc::new(RefCell::new(Value::Bool(true)));
+        let target = Rc::new(RefCell::new(Value::Tuple(vec![shared.clone()])));
+        let rhs = Value::Tuple(vec![shared.clone()]);
+
+        store_flattened(&target, rhs);
+
+        assert_eq!(*shared.borrow(), Value::Bool(true));
     }
 
     #[test]
