@@ -615,20 +615,15 @@ fn dump_corpus_outcomes() {
 
 /// The divergence class for a mismatched outcome pair, for the bucketed report.
 fn divergence_bucket(a: &DiffOutcome, b: &DiffOutcome) -> &'static str {
-    if matches!(
-        a,
-        DiffOutcome::Errored {
-            kind: FailureKind::Panic,
-            ..
-        }
-    ) || matches!(
-        b,
-        DiffOutcome::Errored {
-            kind: FailureKind::Panic,
-            ..
-        }
-    ) {
+    let contains = |expected: &FailureKind| {
+        matches!(a, DiffOutcome::Errored { kind, .. } if kind == expected)
+            || matches!(b, DiffOutcome::Errored { kind, .. } if kind == expected)
+    };
+    if contains(&FailureKind::Panic) {
         return "panic";
+    }
+    if contains(&FailureKind::Internal) {
+        return "internal_error";
     }
     match (a, b) {
         (DiffOutcome::Returned(_), DiffOutcome::Returned(_)) => "value_mismatch",
@@ -636,6 +631,68 @@ fn divergence_bucket(a: &DiffOutcome, b: &DiffOutcome) -> &'static str {
         | (DiffOutcome::Errored { .. }, DiffOutcome::Returned(_)) => "returned_vs_errored",
         (DiffOutcome::Errored { .. }, DiffOutcome::Errored { .. }) => "kind_mismatch",
     }
+}
+
+fn divergence_is_allowlistable(a: &DiffOutcome, b: &DiffOutcome) -> bool {
+    !matches!(divergence_bucket(a, b), "panic" | "internal_error")
+}
+
+fn absent_allowlist_entries<T, U>(
+    allowlist: &[(&str, &str)],
+    first: &std::collections::BTreeMap<String, T>,
+    second: &std::collections::BTreeMap<String, U>,
+) -> Vec<String> {
+    allowlist
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !first.contains_key(*name) && !second.contains_key(*name))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn allowlist_rejects_hard_failures() {
+    let returned = DiffOutcome::Returned(DiffValue::Unit);
+    for (kind, bucket) in [
+        (FailureKind::Panic, "panic"),
+        (FailureKind::Internal, "internal_error"),
+    ] {
+        let failed = DiffOutcome::Errored {
+            kind,
+            detail: String::new(),
+        };
+        for (first, second) in [(&returned, &failed), (&failed, &returned)] {
+            assert_eq!(divergence_bucket(first, second), bucket);
+            assert!(!divergence_is_allowlistable(first, second));
+        }
+    }
+
+    let expected_field_failure = DiffOutcome::Errored {
+        kind: FailureKind::AssertionFailed,
+        detail: String::new(),
+    };
+    assert!(divergence_is_allowlistable(
+        &returned,
+        &expected_field_failure
+    ));
+}
+
+#[test]
+fn allowlist_entry_absent_from_both_dumps_is_stale() {
+    use std::collections::BTreeMap;
+
+    let present = DiffOutcome::Returned(DiffValue::Unit);
+    let bn254 = BTreeMap::from([("present".to_string(), present.clone())]);
+    let goldilocks = BTreeMap::from([("present".to_string(), present)]);
+    let allowlist = [
+        ("deleted", "old field-dependent case"),
+        ("present", "still here"),
+    ];
+
+    assert_eq!(
+        absent_allowlist_entries(&allowlist, &bn254, &goldilocks),
+        vec!["deleted"]
+    );
 }
 
 /// Write the bucketed divergence report to `target/cross_field_report.{json,md}`.
@@ -787,7 +844,7 @@ fn cross_field_diff() {
 
     let mut divergences: Vec<(String, &'static str, String)> = Vec::new();
     let mut allowlisted_hits: Vec<String> = Vec::new();
-    let mut stale_allowlist: Vec<String> = Vec::new();
+    let mut stale_allowlist = absent_allowlist_entries(KNOWN_FIELD_DEPENDENT, &bn, &gl);
     let mut missing: Vec<String> = Vec::new();
     let mut tolerated_names: Vec<String> = Vec::new();
     let mut compared = 0usize;
@@ -810,7 +867,9 @@ fn cross_field_diff() {
                     stale_allowlist.push(name.clone());
                 }
             }
-            Err(reason) if allowlisted.contains(name.as_str()) => {
+            Err(reason)
+                if allowlisted.contains(name.as_str()) && divergence_is_allowlistable(b, g) =>
+            {
                 allowlisted_hits.push(format!("{name}: {reason}"));
             }
             Err(reason) => divergences.push((name.clone(), divergence_bucket(b, g), reason)),
@@ -844,7 +903,7 @@ fn cross_field_diff() {
     );
     assert!(
         stale_allowlist.is_empty(),
-        "allowlisted program(s) no longer diverge — remove from KNOWN_FIELD_DEPENDENT: {}",
+        "allowlisted program(s) are absent or no longer diverge — remove from KNOWN_FIELD_DEPENDENT: {}",
         stale_allowlist.join(", ")
     );
     assert!(
