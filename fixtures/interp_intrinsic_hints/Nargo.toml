@@ -1,0 +1,6 @@
+[package]
+name = "interp_intrinsic_hints"
+type = "bin"
+authors = [""]
+
+[dependencies]

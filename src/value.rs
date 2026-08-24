@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use acvm::{AcirField, FieldElement};
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Zero};
@@ -19,9 +22,13 @@ pub enum Value {
     Bool(bool),
     Unit,
     Array(Vec<Value>),
-    Tuple(Vec<Value>),
+    // Fields are shared cells so `&mut s.field` aliases; value reads `deep_copy` out.
+    Tuple(Vec<Rc<RefCell<Value>>>),
     Str(String),
     Function(FuncId),
+    // Shared cell. `auto_deref` = a `let mut`/mutable-param slot (loaded on a bare read); a plain
+    // `&`/`&mut` reference is `false`.
+    Ref(Rc<RefCell<Value>>, bool),
 }
 
 /// A machine integer: width, signedness, and the canonical value.
@@ -111,6 +118,57 @@ impl IntValue {
 }
 
 impl Value {
+    /// Build a tuple, wrapping each field in its own shared cell.
+    pub fn tuple(values: Vec<Value>) -> Value {
+        Value::Tuple(
+            values
+                .into_iter()
+                .map(|v| Rc::new(RefCell::new(v)))
+                .collect(),
+        )
+    }
+
+    /// Read tuple field `i` as an owned, unaliased value; auto-derefs a reference to a tuple.
+    pub fn tuple_field(&self, i: usize) -> Result<Value, InterpretError> {
+        match self {
+            Value::Tuple(cells) => cells
+                .get(i)
+                .map(|c| c.borrow().deep_copy())
+                .ok_or_else(|| InterpretError::Type(format!("tuple field {i} out of bounds"))),
+            Value::Ref(cell, _) => cell.borrow().tuple_field(i),
+            other => Err(InterpretError::Type(format!(
+                "cannot extract field from {other:?}"
+            ))),
+        }
+    }
+
+    /// Follow a reference one level. A non-`Ref` is a reference shape we don't model (nested or
+    /// multi-level) — tolerated as `Unsupported`, not a miscompile.
+    pub fn deref(&self) -> Result<Value, InterpretError> {
+        match self {
+            Value::Ref(cell, _) => Ok(cell.borrow().deep_copy()),
+            other => Err(InterpretError::Unsupported(format!(
+                "dereference of a non-reference value ({other:?})"
+            ))),
+        }
+    }
+
+    /// Replace every shared cell (in tuples, and through arrays) with a fresh one, so a value read
+    /// never aliases a binding. `Ref` keeps its cell — references are meant to share. Borrowing
+    /// receiver so hot read paths copy in a single traversal, without an intermediate clone.
+    pub fn deep_copy(&self) -> Value {
+        match self {
+            Value::Tuple(cells) => Value::Tuple(
+                cells
+                    .iter()
+                    .map(|c| Rc::new(RefCell::new(c.borrow().deep_copy())))
+                    .collect(),
+            ),
+            Value::Array(elements) => Value::Array(elements.iter().map(Value::deep_copy).collect()),
+            other => other.clone(),
+        }
+    }
+
     pub fn as_bool(&self) -> Result<bool, InterpretError> {
         match self {
             Value::Bool(b) => Ok(*b),

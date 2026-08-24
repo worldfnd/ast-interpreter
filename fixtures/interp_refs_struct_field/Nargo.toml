@@ -1,0 +1,6 @@
+[package]
+name = "interp_refs_struct_field"
+type = "bin"
+authors = [""]
+
+[dependencies]

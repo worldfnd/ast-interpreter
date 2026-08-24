@@ -1,0 +1,6 @@
+[package]
+name = "intrinsic_conversions"
+type = "bin"
+authors = [""]
+
+[dependencies]

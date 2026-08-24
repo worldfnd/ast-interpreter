@@ -1,0 +1,6 @@
+[package]
+name = "interp_closures"
+type = "bin"
+authors = [""]
+
+[dependencies]

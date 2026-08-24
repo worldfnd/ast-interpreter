@@ -1,0 +1,6 @@
+[package]
+name = "intrinsic_range_constraint"
+type = "bin"
+authors = [""]
+
+[dependencies]

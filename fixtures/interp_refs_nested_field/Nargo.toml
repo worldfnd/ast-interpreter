@@ -1,0 +1,6 @@
+[package]
+name = "interp_refs_nested_field"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -13,6 +13,7 @@ mod diff;
 mod error;
 mod eval;
 mod input;
+mod intrinsics;
 mod value;
 
 #[cfg(test)]
@@ -34,7 +35,9 @@ pub use error::InterpretError;
 pub use input::{expected_return_from_prover_toml, inputs_from_prover_toml};
 pub use value::{IntValue, Value};
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use noirc_frontend::monomorphization::ast::{FuncId, Function, GlobalId, LocalId, Program};
 
@@ -56,6 +59,9 @@ enum GlobalState {
 pub(crate) struct Interpreter<'p> {
     program: &'p Program,
     globals: HashMap<GlobalId, GlobalState>,
+    /// Whether the current function is unconstrained; drives `is_unconstrained()`. The monomorphizer
+    /// emits a separate variant per function, so this is just the current function's own flag.
+    unconstrained: bool,
 }
 
 /// Interpret `program`'s entry point with no inputs (for self-checking programs whose `main`
@@ -101,6 +107,7 @@ impl<'p> Interpreter<'p> {
         Interpreter {
             program,
             globals: HashMap::new(),
+            unconstrained: false,
         }
     }
 
@@ -118,10 +125,22 @@ impl<'p> Interpreter<'p> {
             )));
         }
         let mut frame = Frame::new();
-        for ((local_id, _mutable, _name, _typ, _vis), arg) in func.parameters.iter().zip(args) {
-            frame.insert(*local_id, arg);
+        for ((local_id, mutable, _name, _typ, _vis), arg) in func.parameters.iter().zip(args) {
+            // A `mut` param is a mutable slot; a `&mut`-typed param isn't `mutable`, so it binds
+            // directly to the passed `Ref` and aliases the caller.
+            let bound = if *mutable {
+                Value::Ref(Rc::new(RefCell::new(arg)), true)
+            } else {
+                arg
+            };
+            frame.insert(*local_id, bound);
         }
-        match self.eval(&func.body, &mut frame)? {
+        // Enter the callee's constrained-ness for the duration of its body.
+        let outer_unconstrained = self.unconstrained;
+        self.unconstrained = func.unconstrained;
+        let flow = self.eval(&func.body, &mut frame);
+        self.unconstrained = outer_unconstrained;
+        match flow? {
             Flow::Normal(value) => Ok(value),
             Flow::Break | Flow::Continue => Err(InterpretError::Internal(
                 "break/continue escaped a function body".to_string(),
