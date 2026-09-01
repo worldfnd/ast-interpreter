@@ -343,7 +343,7 @@ impl<'p> Interpreter<'p> {
         env: &mut Frame,
     ) -> Result<Value, InterpretError> {
         let value = match literal {
-            // beta.22: the integer literal carries a signed `BigInt` (previously a `SignedField`).
+            // The integer literal carries a signed `BigInt` (previously a `SignedField`).
             Literal::Integer(value, typ, _) => match typ {
                 // A Field literal's `BigInt` is the signed representative; `bigint_to_field` reduces
                 // it into the compiled-in field (a negative value maps to `modulus - |value|`),
