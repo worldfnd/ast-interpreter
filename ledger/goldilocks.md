@@ -55,7 +55,7 @@ What the referee observed for every program of Noir's `execution_success` corpus
 | assert_statement | 9f0a79b4cb510e93 | ok | ok | ok | n/a: no recorded return | () | f3f75d2289450b1d |
 | assign_ex | 9d40b3ebb05f3338 | ok | ok | ok | n/a: no recorded return | () | ec584ef394f98845 |
 | associated_constant_as_array_length | 63f01b284d81ccb3 | ok | ok | ok | n/a: no recorded return | () | 62b0ba81a5603092 |
-| bench_2_to_17 | 69f819a242995b28 | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#a25ab19f | n/a: not compiled | n/a: not interpreted |  |  |
+| bench_2_to_17 | 69f819a242995b28 | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#5da1f8a9 | n/a: not compiled | n/a: not interpreted |  |  |
 | binary_operator_overloading | 2a09d80fe7629d23 | ok | ok | ok | n/a: no recorded return | () | 55a174b01c5000df |
 | bit_and | 247b949084e79565 | ok | ok | ok | n/a: no recorded return | () | 7645bf0e0b599f2b |
 | bit_not | 70be2df290a65516 | ok | ok | ok | n/a: no recorded return | () | c3d8353b5dcf8ae6 |
@@ -165,7 +165,7 @@ What the referee observed for every program of Noir's `execution_success` corpus
 | encrypted_log_regression | 6691440864c1f6d5 | ok | ok | ok | ok | [1u8, 2u8, 3u8, 1u8, 2u8, 0u8, 9u8, 8u8, 7u8, 6u8, 5u8, 4u8, 3u8, 2u8, 1u8] | 513af6194ffda778 |
 | field_attribute | daf2370c53001245 | ok | FAIL CompileError: cannot find `foo` in this scope | n/a: not compiled | n/a: not interpreted |  |  |
 | fmtstr_with_global | e3aff25464e26103 | ok | ok | FAIL Unsupported(format string interpolating a field): format string interpolating a field | n/a: not interpreted |  | 0e3e3f51130d0f75 |
-| fold_2_to_17 | 79843e2ce64bedd8 | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#a25ab19f | n/a: not compiled | n/a: not interpreted |  |  |
+| fold_2_to_17 | 79843e2ce64bedd8 | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#5da1f8a9 | n/a: not compiled | n/a: not interpreted |  |  |
 | fold_after_inlined_calls | ce7431500c3e7c03 | ok | ok | ok | n/a: no recorded return | () | fdb996df6d490e06 |
 | fold_basic | 379f68ca2ddb6bb2 | ok | ok | ok | n/a: no recorded return | () | 5a5fd4644af79454 |
 | fold_basic_nested_call | 793d4a5a148118a8 | ok | ok | ok | n/a: no recorded return | () | d32f5a5acaa21836 |
@@ -173,7 +173,7 @@ What the referee observed for every program of Noir's `execution_success` corpus
 | fold_complex_outputs | 8da110d803215d96 | ok | ok | ok | n/a: no recorded return | () | 69051868d9195a62 |
 | fold_distinct_return | 0aae6efb7caf66db | ok | ok | ok | n/a: no recorded return | () | 2ff78a62a702d3b4 |
 | fold_fibonacci | 82da31612085d5d4 | ok | ok | ok | n/a: no recorded return | () | 19ebab4d46fb1dad |
-| fold_numeric_generic_poseidon | f66d85c0721e11ba | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#a25ab19f | n/a: not compiled | n/a: not interpreted |  |  |
+| fold_numeric_generic_poseidon | f66d85c0721e11ba | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#5da1f8a9 | n/a: not compiled | n/a: not interpreted |  |  |
 | for_loop_inclusive_empty_range | cc26f639116c4e3b | ok | ok | ok | n/a: no recorded return | () | 4624db35b3abe5aa |
 | for_loop_inclusive_u8_max | cc6cd1e33be94ec8 | ok | ok | ok | n/a: no Prover.toml | () | 2a6e154045d54a89 |
 | for_loop_inclusive_with_break | 9347a4e459048595 | ok | ok | ok | n/a: no Prover.toml | () | 05e0dcf7e86bef54 |
@@ -251,7 +251,7 @@ What the referee observed for every program of Noir's `execution_success` corpus
 | nested_vector_return | 96ba22379496bd86 | ok | ok | ok | ok | [[1u32, 2u32, 3u32, 4u32, 5u32], [6u32, 100u32, 8u32, 9u32, 10u32], [11u32, 12u32, 13u32, 14u32, 15u32], [16…#5dbcc768 | 1173df1c85c5f4fc |
 | no_predicates_basic | 128ec0fb6ec0d20e | ok | ok | ok | n/a: no recorded return | () | 7d1cac25fd46dee4 |
 | no_predicates_brillig | 19b4677197b0ff33 | ok | ok | ok | n/a: no recorded return | () | 4e3f78239a7e6175 |
-| no_predicates_numeric_generic_poseidon | 69634f5815332aeb | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#a25ab19f | n/a: not compiled | n/a: not interpreted |  |  |
+| no_predicates_numeric_generic_poseidon | 69634f5815332aeb | ok | FAIL DependencyCompileGap: program reaches dependency code from files that failed elaboration under the chos…#5da1f8a9 | n/a: not compiled | n/a: not interpreted |  |  |
 | numeric_type_alias | f8296fdaa3ed1643 | ok | ok | ok | n/a: no recorded return | () | aeae1c50659c1917 |
 | op_assign_desugaring | f96c98d8545da3a0 | ok | ok | ok | n/a: no Prover.toml | () | 8cc1ec1cc4bbb417 |
 | overlapping_dep_and_mod | d3e8b232fa58707c | n/a: workspace manifest: the referee runs single-package programs | n/a: not loaded | n/a: not compiled | n/a: not interpreted |  |  |

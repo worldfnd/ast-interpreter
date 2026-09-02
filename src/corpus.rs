@@ -326,13 +326,19 @@ fn interpret_failure(error: &InterpretError) -> (ComparableError, String) {
 }
 
 /// The machine-specific roots a payload may mention, each with its stable stand-in: the program's
-/// own directory, the Noir checkout and the referee, in that order so the most specific wins.
+/// own directory, the Noir checkout, the referee and nargo's git-dependency cache (`~/nargo`,
+/// where `nargo_toml` clones a program's git dependencies), in that order so the most specific
+/// wins.
 pub(crate) fn path_roots(program_dir: &Path) -> Vec<(PathBuf, &'static str)> {
-    vec![
+    let mut roots = vec![
         (program_dir.to_path_buf(), "<pkg>"),
         (noir_checkout(), "<noir>"),
         (referee_dir(), "<referee>"),
-    ]
+    ];
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        roots.push((PathBuf::from(home).join("nargo"), "<nargo>"));
+    }
+    roots
 }
 
 /// Replace every root (and its canonical form) with its stand-in so payloads and details carry no
@@ -656,6 +662,20 @@ mod tests {
         let roots = path_roots(&program.dir);
         assert_eq!(roots[0].1, "<pkg>");
         assert!(roots.iter().any(|(_, s)| *s == "<referee>"));
+        // A git dependency's file lives in nargo's cache under the home directory, which differs
+        // between machines; the ledger must not.
+        let (nargo, _) = roots
+            .iter()
+            .find(|(_, s)| *s == "<nargo>")
+            .expect("the nargo cache root");
+        let text = format!(
+            "files: std/hash/mod.nr, {}/github.com/noir-lang/poseidon/v0.3.0/src/poseidon2.nr",
+            nargo.display()
+        );
+        assert_eq!(
+            normalize_paths(&text, &roots),
+            "files: std/hash/mod.nr, <nargo>/github.com/noir-lang/poseidon/v0.3.0/src/poseidon2.nr"
+        );
     }
 
     fn fixture_program(name: &str) -> CorpusProgram {
