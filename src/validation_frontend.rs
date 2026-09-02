@@ -26,9 +26,8 @@ pub(crate) struct Validated {
     pub abi: Abi,
 }
 
-/// A validation frontend failure. `summary` is the diagnostic text alone (messages without spans
-/// or file ids), stable across compiler revisions that only move code around; `detail` is the full
-/// debug rendering for triage.
+/// `summary` is the diagnostic text without spans or file ids; `detail` is the full debug
+/// rendering.
 #[derive(Debug)]
 pub(crate) enum ValidationError {
     Compile { summary: String, detail: String },

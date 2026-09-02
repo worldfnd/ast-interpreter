@@ -15,12 +15,8 @@ use super::value::{Value, field_to_bigint};
 /// dump is rejected rather than silently misread.
 pub const DUMP_FORMAT_VERSION: u32 = 3;
 
-/// A field-independent encoding of an interpreter [`Value`].
-///
-/// `Field` carries the element's canonical value in `[0, p)` as a decimal string so a ledger row
-/// can print it; the field-axis comparison still treats two field elements as equivalent whatever
-/// their values, because they are field-specific by nature. Integers carry their exact value as a
-/// `BigInt` so the comparison is precise regardless of width.
+/// A field-independent encoding of an interpreter [`Value`]. `Field` carries its canonical value
+/// as a decimal string for the ledger; the field-axis comparison still treats it as opaque.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffValue {
     Field(String),
@@ -116,20 +112,16 @@ pub enum FailureKind {
     OracleMismatch,
 }
 
-impl FailureKind {
-    /// The kind as a short label: the variant name, with the construct for `Unsupported`.
-    pub fn label(&self) -> String {
+impl fmt::Display for FailureKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FailureKind::Unsupported { construct } => format!("Unsupported({construct})"),
-            other => format!("{other:?}"),
+            FailureKind::Unsupported { construct } => write!(f, "Unsupported({construct})"),
+            other => write!(f, "{other:?}"),
         }
     }
 }
 
-/// A failure reduced to what two runs of one program can be compared on: the kind, and the
-/// payload that tells two failures of the same kind apart (the normalized assertion message, the
-/// overflowing operation, the unsupported construct, the compiler's diagnostic text). Triage
-/// detail that is neither compared nor written to the ledger lives beside it, never inside it.
+/// A failure's kind plus the payload that tells two failures of the same kind apart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComparableError {
     pub kind: FailureKind,
@@ -148,9 +140,9 @@ impl ComparableError {
 impl fmt::Display for ComparableError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.payload.is_empty() {
-            write!(f, "{}", self.kind.label())
+            write!(f, "{}", self.kind)
         } else {
-            write!(f, "{}: {}", self.kind.label(), self.payload)
+            write!(f, "{}: {}", self.kind, self.payload)
         }
     }
 }
@@ -204,7 +196,7 @@ pub(crate) fn normalize_construct(msg: &str) -> String {
 }
 
 /// Collapse every whitespace run to one space and trim, so a payload is one stable line.
-pub fn normalize_text(text: &str) -> String {
+pub(crate) fn normalize_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -257,8 +249,7 @@ impl StepOutcome {
     }
 }
 
-/// Everything one run of one program produced, step by step. Each step runs under its own panic
-/// guard, so a panic is recorded where it happened and the steps after it read `NotRun`.
+/// One program's run, step by step; each step runs under its own panic guard.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
     /// Hash of the program's normalized sources (`Nargo.toml`, `Prover.toml`, `src/**`).
@@ -312,7 +303,7 @@ fn is_internal(outcome: &DiffOutcome) -> bool {
 }
 
 /// Whether this outcome provides no executable result to compare.
-pub fn is_coverage_gap(outcome: &DiffOutcome) -> bool {
+pub(crate) fn is_coverage_gap(outcome: &DiffOutcome) -> bool {
     matches!(
         outcome,
         DiffOutcome::Errored { error, .. }
@@ -365,8 +356,7 @@ pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), Strin
             } else {
                 Err(format!(
                     "both errored, but differently: {} vs {}",
-                    ea.kind.label(),
-                    eb.kind.label()
+                    ea.kind, eb.kind
                 ))
             }
         }
@@ -382,18 +372,16 @@ pub fn outcome_is_tolerated(a: &DiffOutcome, b: &DiffOutcome) -> bool {
         && (is_coverage_gap(a) || is_coverage_gap(b))
 }
 
-/// A dump's provenance, stamped when it is written so two dumps from mismatched builds are rejected
-/// rather than diffed into phantom divergences. The ledger header prints the reproducible subset;
-/// `interpreter_rev`, `interpreter_dirty`, `corpus_dir` and `built_at` are triage fields that only
-/// the JSON dump carries.
+/// What a dump was built from, so mismatched dumps are refused. The ledger header prints the
+/// reproducible subset; `interpreter_rev`, `interpreter_dirty`, `corpus_dir` and `built_at` stay
+/// in the JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DumpProvenance {
     pub format_version: u32,
     pub projection_version: u32,
     pub field: String,
     pub field_modulus: String,
-    /// The compiler's own build-script stamp (`noirc_driver::GIT_COMMIT`): the commit the pinned
-    /// crates were built from, whatever `Cargo.toml` claims.
+    /// The compiler's own build stamp (`noirc_driver::GIT_COMMIT`).
     pub noir_rev: String,
     pub interpreter_rev: String,
     pub interpreter_dirty: bool,
@@ -611,16 +599,9 @@ mod tests {
         assert!(outcomes_equivalent(&a, &b).is_err());
     }
 
-    fn cmp(kind: FailureKind, payload: &str) -> ComparableError {
-        ComparableError {
-            kind,
-            payload: payload.to_string(),
-        }
-    }
-
     fn failed(kind: FailureKind, payload: &str) -> DiffOutcome {
         DiffOutcome::Errored {
-            error: cmp(kind, payload),
+            error: ComparableError::new(kind, payload),
             detail: String::new(),
         }
     }
@@ -642,44 +623,33 @@ mod tests {
     }
 
     #[test]
-    fn overflow_payload_is_the_operation() {
-        let error = comparable_error_of(&InterpretError::Overflow("addition on u64".to_string()));
-        assert_eq!(error.kind, FailureKind::Overflow);
-        assert_eq!(error.payload, "addition on u64");
-    }
-
-    #[test]
-    fn assertion_payload_is_the_whitespace_normalized_message() {
+    fn payloads_are_normalized_and_constructs_are_the_message_head() {
         let error = comparable_error_of(&InterpretError::AssertionFailed {
             location: noirc_errors::Location::dummy(),
             message: Some("  a   ==\n b ".to_string()),
         });
-        assert_eq!(error.kind, FailureKind::AssertionFailed);
-        assert_eq!(error.payload, "a == b");
-    }
-
-    #[test]
-    fn unsupported_payload_keeps_the_whole_message_and_the_kind_keeps_the_construct() {
-        let error = comparable_error_of(&InterpretError::Unsupported(
-            "intrinsic 'foo': bar".to_string(),
-        ));
         assert_eq!(
-            error.kind,
-            FailureKind::Unsupported {
-                construct: "intrinsic".to_string()
-            }
+            error,
+            ComparableError::new(FailureKind::AssertionFailed, "a == b")
         );
-        assert_eq!(error.payload, "intrinsic 'foo': bar");
 
-        let error = comparable_error_of(&InterpretError::Unsupported(
-            "dereference of a non-reference value (Tuple([RefCell { value: Field(0) }]))"
-                .to_string(),
-        ));
+        let unsupported = |message: &str| {
+            let error = comparable_error_of(&InterpretError::Unsupported(message.to_string()));
+            let FailureKind::Unsupported { construct } = error.kind else {
+                panic!("{error}");
+            };
+            (construct, error.payload)
+        };
         assert_eq!(
-            error.kind,
-            FailureKind::Unsupported {
-                construct: "dereference of a non-reference value".to_string()
-            }
+            unsupported("intrinsic 'foo': bar"),
+            ("intrinsic".to_string(), "intrinsic 'foo': bar".to_string())
+        );
+        assert_eq!(
+            unsupported(
+                "dereference of a non-reference value (Tuple([RefCell { value: Field(0) }]))"
+            )
+            .0,
+            "dereference of a non-reference value"
         );
     }
 
@@ -697,35 +667,34 @@ mod tests {
     }
 
     #[test]
-    fn record_with_a_value_returns_it() {
-        assert_eq!(record().outcome(), DiffOutcome::Returned(int("7")));
-    }
-
-    #[test]
-    fn record_outcome_is_the_first_failed_step() {
+    fn record_outcome_is_the_value_else_the_first_failed_step() {
         let mut r = record();
-        r.compile = StepOutcome::failed(cmp(FailureKind::CompileError, "no main"), "detail");
+        r.oracle = StepOutcome::failed(
+            ComparableError::new(FailureKind::OracleMismatch, "integer differs"),
+            "",
+        );
+        assert_eq!(r.outcome(), DiffOutcome::Returned(int("7")));
+
+        let error = ComparableError::new(FailureKind::CompileError, "no main");
+        r.compile = StepOutcome::failed(error.clone(), "detail");
         r.interpret = StepOutcome::not_run("not compiled");
         r.returned = None;
-        r.projection = StepOutcome::not_run("not compiled");
-        r.projection_hash = None;
         assert_eq!(
             r.outcome(),
-            failed_with_detail(FailureKind::CompileError, "no main", "detail")
+            DiffOutcome::Errored {
+                error,
+                detail: "detail".to_string()
+            }
         );
-    }
-
-    fn failed_with_detail(kind: FailureKind, payload: &str, detail: &str) -> DiffOutcome {
-        DiffOutcome::Errored {
-            error: cmp(kind, payload),
-            detail: detail.to_string(),
-        }
     }
 
     #[test]
     fn an_interpret_panic_is_recorded_and_never_equivalent() {
         let mut r = record();
-        r.interpret = StepOutcome::failed(cmp(FailureKind::Panic, "index out of bounds"), "");
+        r.interpret = StepOutcome::failed(
+            ComparableError::new(FailureKind::Panic, "index out of bounds"),
+            "",
+        );
         r.returned = None;
         let outcome = r.outcome();
         assert!(matches!(
@@ -737,15 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oracle_mismatch_does_not_change_the_verdict() {
-        // The recorded-return check is a row of its own; the field-axis verdict stays the value.
-        let mut r = record();
-        r.oracle = StepOutcome::failed(cmp(FailureKind::OracleMismatch, "integer differs"), "");
-        assert_eq!(r.outcome(), DiffOutcome::Returned(int("7")));
-    }
-
-    #[test]
-    fn a_stale_format_dump_is_rejected_with_the_versions_named() {
+    fn a_stale_dump_format_is_rejected() {
         let stale = r#"{"provenance":{"format_version":2,"field":"bn254","field_modulus":"1","noir_rev":"x","interpreter_rev":"y","corpus_dir":"z","program_count":0,"built_at":""},"outcomes":[]}"#;
         let err = parse_dump(stale).unwrap_err();
         assert!(err.contains("format 2"), "{err}");

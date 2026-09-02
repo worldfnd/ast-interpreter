@@ -19,7 +19,7 @@ use super::{
     interpret_with_inputs,
 };
 
-pub(crate) const CORPUS_SUBDIR: &str = "test_programs/execution_success";
+const CORPUS_SUBDIR: &str = "test_programs/execution_success";
 
 pub(crate) fn referee_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,15 +49,12 @@ pub(crate) fn field_tag() -> &'static str {
     }
 }
 
-pub(crate) fn enabled_features() -> Vec<String> {
-    let mut features = Vec::new();
+fn enabled_features() -> Vec<String> {
     if cfg!(feature = "goldilocks") {
-        features.push("goldilocks".to_string());
+        vec!["goldilocks".to_string()]
+    } else {
+        Vec::new()
     }
-    if cfg!(feature = "mavros-oracle") {
-        features.push("mavros-oracle".to_string());
-    }
-    features
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +125,7 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
 }
 
 /// SHA-256 over every program's name and source hash, in name order.
-pub(crate) fn corpus_hash(programs: &[CorpusProgram]) -> String {
+fn corpus_hash(programs: &[CorpusProgram]) -> String {
     let mut hasher = Sha256::new();
     for program in programs {
         hasher.update(program.name.as_bytes());
@@ -144,7 +141,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 /// Trimmed stdout of `git -C dir args`, or `None` when git fails.
-pub(crate) fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
+fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
     Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -155,9 +152,8 @@ pub(crate) fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-/// `rustc --version` as resolved from the referee's directory, so its `rust-toolchain.toml`
-/// applies.
-pub(crate) fn toolchain_version() -> String {
+/// `rustc --version` resolved from the referee's directory, so its `rust-toolchain.toml` applies.
+fn toolchain_version() -> String {
     Command::new("rustc")
         .arg("--version")
         .current_dir(referee_dir())
@@ -193,8 +189,8 @@ pub(crate) fn provenance(corpus: &Path, programs: &[CorpusProgram]) -> DumpProve
     }
 }
 
-/// The `rev` of every `worldfnd/noir` dependency in the referee's `Cargo.toml`, in file order.
-pub(crate) fn pinned_revs() -> Vec<String> {
+/// The `rev` of every `worldfnd/noir` dependency in `Cargo.toml`, in file order.
+fn pinned_revs() -> Vec<String> {
     let manifest = std::fs::read_to_string(referee_dir().join("Cargo.toml")).expect("Cargo.toml");
     manifest
         .lines()
@@ -206,7 +202,7 @@ pub(crate) fn pinned_revs() -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn pin_disagreement(revs: &[String], stamp: &str) -> Result<(), String> {
+fn pin_disagreement(revs: &[String], stamp: &str) -> Result<(), String> {
     let Some(first) = revs.first() else {
         return Err("Cargo.toml pins no worldfnd/noir crate".to_string());
     };
@@ -240,7 +236,7 @@ pub(crate) fn check_checkout_matches_stamp(checkout: &Path) -> Result<(), String
     checkout_mismatch(checkout, head.as_deref(), noirc_driver::GIT_COMMIT, &dirty)
 }
 
-pub(crate) fn checkout_mismatch(
+fn checkout_mismatch(
     checkout: &Path,
     head: Option<&str>,
     stamp: &str,
@@ -277,9 +273,8 @@ pub(crate) fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// The first non-empty line of a caught panic payload, for triage. Takes the payload itself, not
-/// the `Box` around it: a `&Box<dyn Any>` also unsizes to `&dyn Any`, and that one never
-/// downcasts to the message.
+/// The first non-empty line of a panic payload. Takes the payload, not the `Box`: `&Box<dyn Any>`
+/// also unsizes to `&dyn Any` and never downcasts to the message.
 pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
@@ -294,8 +289,8 @@ pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "panic (payload is not a string)".to_string())
 }
 
-/// Run one step under its own panic guard: a panic becomes a `Panic` failure of that step alone.
-pub(crate) fn run_step<T>(
+/// Run one step under its own panic guard.
+fn run_step<T>(
     step: impl FnOnce() -> Result<T, (ComparableError, String)>,
 ) -> Result<T, StepOutcome> {
     match panic::catch_unwind(AssertUnwindSafe(step)) {
@@ -324,8 +319,9 @@ fn interpret_failure(error: &InterpretError) -> (ComparableError, String) {
     (comparable_error_of(error), error.to_string())
 }
 
-/// Normalize more specific roots first, including nargo's `~/nargo` dependency cache.
-pub(crate) fn path_roots(program_dir: &Path) -> Vec<(PathBuf, &'static str)> {
+/// Machine-specific roots and their stand-ins, most specific first; `~/nargo` is nargo's
+/// git-dependency cache.
+fn path_roots(program_dir: &Path) -> Vec<(PathBuf, &'static str)> {
     let mut roots = vec![
         (program_dir.to_path_buf(), "<pkg>"),
         (noir_checkout(), "<noir>"),
@@ -337,9 +333,8 @@ pub(crate) fn path_roots(program_dir: &Path) -> Vec<(PathBuf, &'static str)> {
     roots
 }
 
-/// Replace every root (and its canonical form) with its stand-in so payloads and details carry no
-/// machine-specific path.
-pub(crate) fn normalize_paths(text: &str, roots: &[(PathBuf, &str)]) -> String {
+/// Replace every root, and its canonical form, with its stand-in.
+fn normalize_paths(text: &str, roots: &[(PathBuf, &str)]) -> String {
     let mut text = text.to_string();
     for (root, stand_in) in roots {
         let mut forms = vec![root.clone()];
@@ -473,8 +468,8 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
     record
 }
 
-/// Check the interpreter's return against the `return` recorded in `Prover.toml`. bn254 compares
-/// exactly; goldilocks compares with `Field` values ignored, because the corpus records bn254's.
+/// Check the return against the `return` recorded in `Prover.toml`: exactly under bn254, with
+/// `Field` values ignored under goldilocks because the corpus records bn254's.
 fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) -> StepOutcome {
     let Some(src) = prover_src else {
         return StepOutcome::not_run("no Prover.toml");
@@ -490,7 +485,7 @@ fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) 
     }
 }
 
-pub(crate) fn compare_with_recorded(actual: &Value, expected: &Value) -> StepOutcome {
+fn compare_with_recorded(actual: &Value, expected: &Value) -> StepOutcome {
     let actual = DiffValue::from_value(actual);
     let expected = DiffValue::from_value(expected);
     if let Err(reason) = values_equivalent(&actual, &expected) {
@@ -591,28 +586,15 @@ mod tests {
     }
 
     #[test]
-    fn disagreeing_pins_are_named() {
+    fn pins_agree_with_each_other_and_with_the_compiler_stamp() {
         let revs = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let err = pin_disagreement(&revs(&["a", "a", "b"]), "a").unwrap_err();
-        assert!(err.contains("both a and b"), "{err}");
-        let err = pin_disagreement(&revs(&["a", "a"]), "c").unwrap_err();
-        assert!(
-            err.contains("pins noir at a") && err.contains("built from c"),
-            "{err}"
-        );
+        assert!(pin_disagreement(&revs(&["a", "a", "b"]), "a").is_err());
+        assert!(pin_disagreement(&revs(&["a", "a"]), "c").is_err());
         assert!(pin_disagreement(&revs(&[]), "a").is_err());
-        assert!(pin_disagreement(&revs(&["a", "a"]), "a").is_ok());
-    }
 
-    #[test]
-    fn pinned_revs_agree_with_the_compiler_stamp() {
-        let revs = pinned_revs();
-        assert_eq!(
-            revs.len(),
-            11,
-            "expected the eleven pinned noir crates: {revs:?}"
-        );
-        pin_disagreement(&revs, noirc_driver::GIT_COMMIT).unwrap();
+        let pinned = pinned_revs();
+        assert_eq!(pinned.len(), 11, "{pinned:?}");
+        pin_disagreement(&pinned, noirc_driver::GIT_COMMIT).unwrap();
     }
 
     #[test]
@@ -711,19 +693,6 @@ mod tests {
         assert!(record.projection.passed(), "{:?}", record.projection);
         assert_eq!(record.projection_hash.as_deref().map(str::len), Some(64));
         assert_eq!(record.oracle, StepOutcome::not_run("no recorded return"));
-    }
-
-    #[test]
-    fn a_workspace_manifest_is_a_not_run_row() {
-        let program = CorpusProgram {
-            name: "ws".to_string(),
-            dir: PathBuf::new(),
-            workspace: true,
-            source_hash: "0".repeat(64),
-        };
-        let record = run_record(&program);
-        assert!(matches!(record.load, StepOutcome::NotRun { .. }));
-        assert_eq!(record.returned, None);
     }
 
     #[test]

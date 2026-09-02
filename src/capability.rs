@@ -1,6 +1,5 @@
 //! Field-property predicates used to explain expected cross-field coverage gaps.
 
-use acvm::{AcirField, FieldElement};
 use num_bigint::BigUint;
 use num_traits::One;
 
@@ -17,8 +16,7 @@ pub(crate) enum Capability {
     EmbeddedCurve,
 }
 
-/// What the comparator knows about one field. Built from a dump's provenance for each side of a
-/// cross-field comparison, or from the compiled-in field for the running build.
+/// One side of a cross-field comparison, built from a dump's provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FieldDescriptor {
     pub name: String,
@@ -27,23 +25,13 @@ pub(crate) struct FieldDescriptor {
 }
 
 impl FieldDescriptor {
-    /// The embedded-curve property is keyed on the field name until the compiler exports a
-    /// run-time field configuration: bn254 carries Grumpkin, no other supported field does.
+    /// The embedded curve is keyed on the name until the compiler exports a run-time field config.
     pub(crate) fn new(name: &str, modulus: BigUint) -> Self {
         FieldDescriptor {
             name: name.to_string(),
             modulus,
             embedded_curve: name == "bn254",
         }
-    }
-
-    /// The field this build compiled in.
-    pub(crate) fn current() -> Self {
-        Self::new(super::corpus::field_tag(), FieldElement::modulus())
-    }
-
-    pub(crate) fn bits(&self) -> u64 {
-        self.modulus.bits()
     }
 }
 
@@ -53,7 +41,7 @@ impl Capability {
             Capability::UnsignedFits(bits) | Capability::SignedFits(bits) => {
                 (BigUint::one() << *bits as usize) <= field.modulus
             }
-            Capability::FieldBitsAtLeast(bits) => field.bits() >= u64::from(*bits),
+            Capability::FieldBitsAtLeast(bits) => field.modulus.bits() >= u64::from(*bits),
             Capability::EmbeddedCurve => field.embedded_curve,
         }
     }
@@ -86,7 +74,8 @@ mod tests {
     }
 
     #[test]
-    fn bn254_holds_every_tag() {
+    fn tags_follow_the_modulus() {
+        let (bn, gl) = (bn254(), goldilocks());
         for tag in [
             Capability::UnsignedFits(64),
             Capability::UnsignedFits(128),
@@ -94,30 +83,11 @@ mod tests {
             Capability::FieldBitsAtLeast(254),
             Capability::EmbeddedCurve,
         ] {
-            assert!(tag.holds(&bn254()), "{tag:?}");
+            assert!(tag.holds(&bn), "{tag:?}");
+            assert!(!tag.holds(&gl), "{tag:?}");
         }
-    }
-
-    #[test]
-    fn goldilocks_holds_only_what_fits_in_64_bits() {
-        let gl = goldilocks();
         assert!(Capability::UnsignedFits(32).holds(&gl));
         assert!(Capability::SignedFits(32).holds(&gl));
         assert!(Capability::FieldBitsAtLeast(64).holds(&gl));
-        // 2^64 > p = 2^64 - 2^32 + 1: a u64 does not fit and an i64 encoding collides.
-        assert!(!Capability::UnsignedFits(64).holds(&gl));
-        assert!(!Capability::SignedFits(64).holds(&gl));
-        assert!(!Capability::FieldBitsAtLeast(65).holds(&gl));
-        assert!(!Capability::EmbeddedCurve.holds(&gl));
-    }
-
-    #[test]
-    fn the_compiled_in_field_is_described_by_its_tag_and_modulus() {
-        let current = FieldDescriptor::current();
-        if cfg!(feature = "goldilocks") {
-            assert_eq!(current, goldilocks());
-        } else {
-            assert_eq!(current, bn254());
-        }
     }
 }

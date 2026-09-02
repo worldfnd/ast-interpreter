@@ -123,11 +123,7 @@ impl<'p> Canonicalizer<'p> {
 
     fn function_by_id(&self, id: FuncId) -> Option<&'p Function> {
         let program: &'p Program = self.program;
-        program
-            .functions
-            .get(id.0 as usize)
-            .filter(|f| f.id == id)
-            .or_else(|| program.functions.iter().find(|f| f.id == id))
+        program.functions.get(id.0 as usize).filter(|f| f.id == id)
     }
 
     fn emit_function(&mut self, id: FuncId) {
