@@ -14,6 +14,7 @@ mod error;
 mod eval;
 mod input;
 mod intrinsics;
+mod projection;
 mod value;
 
 #[cfg(test)]
@@ -32,6 +33,7 @@ pub use diff::{
     failure_kind_of, outcome_is_tolerated, outcomes_equivalent, values_equivalent,
 };
 pub use error::InterpretError;
+pub use projection::{PROJECTION_VERSION, canonical_text, projection_hash};
 pub use input::{expected_return_from_prover_toml, inputs_from_prover_toml};
 pub use value::{IntValue, Value};
 
