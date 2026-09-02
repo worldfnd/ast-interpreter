@@ -1,14 +1,7 @@
-//! A versioned canonical projection of the monomorphized program, and its hash.
-//!
-//! The mono AST is what Mavros consumes, so the ledger fingerprints it. The projection strips what
-//! is not program meaning (source locations, debug tables, identifier-use ids), renumbers every
-//! function, global and local by first encounter in a fixed traversal from `main`, and keeps
-//! everything else: names, types, exact literals, operators, visibility and inlining attributes.
-//! Two builds that reach the same program through differently numbered items (as `#[field]`
-//! gating makes the two fields do) therefore project identically. The projection is a referee
-//! artifact, not a contract: bump [`PROJECTION_VERSION`] whenever its text changes.
+//! Fingerprint monomorphized programs, ignoring source locations, debug data and item IDs.
+//! Bump [`PROJECTION_VERSION`] whenever the canonical format changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use noirc_frontend::hir_def::expr::Constructor;
 use noirc_frontend::monomorphization::ast::{
@@ -16,10 +9,11 @@ use noirc_frontend::monomorphization::ast::{
     Program,
 };
 use noirc_frontend::token::FmtStrFragment;
+use noirc_printable_type::PrintableType;
 use sha2::{Digest, Sha256};
 
 /// The projection's format version; part of every dump and ledger header.
-pub const PROJECTION_VERSION: u32 = 1;
+pub const PROJECTION_VERSION: u32 = 2;
 
 /// The SHA-256 of [`canonical_text`], as lowercase hex.
 pub fn projection_hash(program: &Program) -> String {
@@ -33,9 +27,9 @@ pub fn canonical_text(program: &Program) -> String {
         program,
         out: format!("(program v{PROJECTION_VERSION}\n"),
         functions: HashMap::new(),
-        function_queue: Vec::new(),
+        function_queue: VecDeque::new(),
         globals: HashMap::new(),
-        global_queue: Vec::new(),
+        global_queue: VecDeque::new(),
         locals: HashMap::new(),
     };
     canonicalizer.run();
@@ -47,9 +41,9 @@ struct Canonicalizer<'p> {
     program: &'p Program,
     out: String,
     functions: HashMap<FuncId, u32>,
-    function_queue: Vec<FuncId>,
+    function_queue: VecDeque<FuncId>,
     globals: HashMap<GlobalId, u32>,
-    global_queue: Vec<GlobalId>,
+    global_queue: VecDeque<GlobalId>,
     /// Reset for every function body and every global initializer.
     locals: HashMap<LocalId, u32>,
 }
@@ -58,8 +52,7 @@ impl<'p> Canonicalizer<'p> {
     fn run(&mut self) {
         self.function_id(Program::main_id());
         self.drain();
-        // Anything not reachable from `main` (the monomorphizer emits none, but the projection
-        // stays total) follows in emission order.
+        // Unreachable items follow in emission order.
         let leftover_functions: Vec<FuncId> = self
             .program
             .functions
@@ -87,18 +80,11 @@ impl<'p> Canonicalizer<'p> {
         }
     }
 
-    /// Emit queued functions and globals until both queues are exhausted; emitting one may
-    /// discover more of either.
     fn drain(&mut self) {
-        let (mut next_function, mut next_global) = (0usize, 0usize);
         loop {
-            if next_function < self.function_queue.len() {
-                let id = self.function_queue[next_function];
-                next_function += 1;
+            if let Some(id) = self.function_queue.pop_front() {
                 self.emit_function(id);
-            } else if next_global < self.global_queue.len() {
-                let id = self.global_queue[next_global];
-                next_global += 1;
+            } else if let Some(id) = self.global_queue.pop_front() {
                 self.emit_global(id);
             } else {
                 break;
@@ -112,7 +98,7 @@ impl<'p> Canonicalizer<'p> {
         }
         let n = self.functions.len() as u32;
         self.functions.insert(id, n);
-        self.function_queue.push(id);
+        self.function_queue.push_back(id);
         n
     }
 
@@ -122,7 +108,7 @@ impl<'p> Canonicalizer<'p> {
         }
         let n = self.globals.len() as u32;
         self.globals.insert(id, n);
-        self.global_queue.push(id);
+        self.global_queue.push_back(id);
         n
     }
 
@@ -165,13 +151,11 @@ impl<'p> Canonicalizer<'p> {
             let l = self.local_id(*local);
             self.out.push_str(&format!(
                 " (l#{l} mut={mutable} {name:?} {:?} {visibility:?})",
-                typ.to_string()
+                typ
             ));
         }
-        self.out.push_str(&format!(
-            ")\n  -> {:?}\n  ",
-            function.return_type.to_string()
-        ));
+        self.out
+            .push_str(&format!(")\n  -> {:?}\n  ", function.return_type));
         self.expr(&function.body);
         self.out.push_str(")\n");
     }
@@ -184,7 +168,7 @@ impl<'p> Canonicalizer<'p> {
         };
         self.locals.clear();
         self.out
-            .push_str(&format!(" (global g#{n} {name:?} {:?} ", typ.to_string()));
+            .push_str(&format!(" (global g#{n} {name:?} {:?} ", typ));
         self.expr(expression);
         self.out.push_str(")\n");
     }
@@ -213,9 +197,7 @@ impl<'p> Canonicalizer<'p> {
                 let definition = self.definition(&ident.definition);
                 self.out.push_str(&format!(
                     "(ident {definition} mut={} {:?} {:?})",
-                    ident.mutable,
-                    ident.name,
-                    ident.typ.to_string()
+                    ident.mutable, ident.name, ident.typ
                 ));
             }
             Expression::Literal(literal) => self.literal(literal),
@@ -227,9 +209,7 @@ impl<'p> Canonicalizer<'p> {
             Expression::Unary(unary) => {
                 self.out.push_str(&format!(
                     "(unary {:?} skip={} {:?} ",
-                    unary.operator,
-                    unary.skip,
-                    unary.result_type.to_string()
+                    unary.operator, unary.skip, unary.result_type
                 ));
                 self.expr(&unary.rhs);
                 self.out.push(')');
@@ -244,15 +224,14 @@ impl<'p> Canonicalizer<'p> {
             }
             Expression::Index(index) => {
                 self.out
-                    .push_str(&format!("(index {:?} ", index.element_type.to_string()));
+                    .push_str(&format!("(index {:?} ", index.element_type));
                 self.expr(&index.collection);
                 self.out.push(' ');
                 self.expr(&index.index);
                 self.out.push(')');
             }
             Expression::Cast(cast) => {
-                self.out
-                    .push_str(&format!("(cast {:?} ", cast.r#type.to_string()));
+                self.out.push_str(&format!("(cast {:?} ", cast.r#type));
                 self.expr(&cast.lhs);
                 self.out.push(')');
             }
@@ -260,9 +239,7 @@ impl<'p> Canonicalizer<'p> {
                 let l = self.local_id(for_.index_variable);
                 self.out.push_str(&format!(
                     "(for l#{l} {:?} {:?} inclusive={} ",
-                    for_.index_name,
-                    for_.index_type.to_string(),
-                    for_.inclusive
+                    for_.index_name, for_.index_type, for_.inclusive
                 ));
                 self.expr(&for_.start_range);
                 self.out.push(' ');
@@ -284,8 +261,7 @@ impl<'p> Canonicalizer<'p> {
                 self.out.push(')');
             }
             Expression::If(if_) => {
-                self.out
-                    .push_str(&format!("(if {:?} ", if_.typ.to_string()));
+                self.out.push_str(&format!("(if {:?} ", if_.typ));
                 self.expr(&if_.condition);
                 self.out.push(' ');
                 self.expr(&if_.consequence);
@@ -303,8 +279,7 @@ impl<'p> Canonicalizer<'p> {
                 let l = self.local_id(match_.variable_to_match.0);
                 self.out.push_str(&format!(
                     "(match l#{l} {:?} {:?}",
-                    match_.variable_to_match.1,
-                    match_.typ.to_string()
+                    match_.variable_to_match.1, match_.typ
                 ));
                 for case in &match_.cases {
                     self.out.push_str(" (case ");
@@ -339,8 +314,7 @@ impl<'p> Canonicalizer<'p> {
                 self.out.push(')');
             }
             Expression::Call(call) => {
-                self.out
-                    .push_str(&format!("(call {:?} ", call.return_type.to_string()));
+                self.out.push_str(&format!("(call {:?} ", call.return_type));
                 self.expr(&call.func);
                 self.exprs(&call.arguments);
                 self.out.push(')');
@@ -358,7 +332,8 @@ impl<'p> Canonicalizer<'p> {
                 match message {
                     Some(message) => {
                         let (expression, typ) = message.as_ref();
-                        self.out.push_str(&format!(" (msg {:?} ", typ.to_string()));
+                        self.out
+                            .push_str(&format!(" (msg {:?} ", PrintableType::from(typ)));
                         self.expr(expression);
                         self.out.push(')');
                     }
@@ -394,8 +369,7 @@ impl<'p> Canonicalizer<'p> {
     }
 
     fn array(&mut self, tag: &str, literal: &ArrayLiteral) {
-        self.out
-            .push_str(&format!("({tag} {:?}", literal.typ.to_string()));
+        self.out.push_str(&format!("({tag} {:?}", literal.typ));
         self.exprs(&literal.contents);
         self.out.push(')');
     }
@@ -410,16 +384,13 @@ impl<'p> Canonicalizer<'p> {
                 is_vector,
                 typ,
             } => {
-                self.out.push_str(&format!(
-                    "(repeated {:?} {length} vector={is_vector} ",
-                    typ.to_string()
-                ));
+                self.out
+                    .push_str(&format!("(repeated {:?} {length} vector={is_vector} ", typ));
                 self.expr(element);
                 self.out.push(')');
             }
             Literal::Integer(value, typ, _) => {
-                self.out
-                    .push_str(&format!("(int {value} {:?})", typ.to_string()));
+                self.out.push_str(&format!("(int {value} {:?})", typ));
             }
             Literal::Bool(value) => self.out.push_str(&format!("(bool {value})")),
             Literal::Unit => self.out.push_str("unit"),
@@ -478,9 +449,7 @@ impl<'p> Canonicalizer<'p> {
                 let definition = self.definition(&ident.definition);
                 self.out.push_str(&format!(
                     "(lident {definition} mut={} {:?} {:?})",
-                    ident.mutable,
-                    ident.name,
-                    ident.typ.to_string()
+                    ident.mutable, ident.name, ident.typ
                 ));
             }
             LValue::Index {
@@ -489,8 +458,7 @@ impl<'p> Canonicalizer<'p> {
                 element_type,
                 ..
             } => {
-                self.out
-                    .push_str(&format!("(lindex {:?} ", element_type.to_string()));
+                self.out.push_str(&format!("(lindex {:?} ", element_type));
                 self.lvalue(array);
                 self.out.push(' ');
                 self.expr(index);
@@ -508,8 +476,7 @@ impl<'p> Canonicalizer<'p> {
                 reference,
                 element_type,
             } => {
-                self.out
-                    .push_str(&format!("(lderef {:?} ", element_type.to_string()));
+                self.out.push_str(&format!("(lderef {:?} ", element_type));
                 self.lvalue(reference);
                 self.out.push(')');
             }
@@ -670,7 +637,6 @@ mod tests {
         let one = sample(1, 2, 0, 1, 0, 0);
         let other = sample(2, 1, 7, 3, 9, 0);
         assert_eq!(canonical_text(&one), canonical_text(&other));
-        assert_eq!(projection_hash(&one), projection_hash(&other));
     }
 
     #[test]
@@ -707,17 +673,83 @@ mod tests {
     }
 
     #[test]
+    fn unreachable_items_do_not_repeat_reachable_items() {
+        let mut program = sample(1, 2, 0, 1, 0, 0);
+        program
+            .functions
+            .push(function(3, "unused", &[], int(5, 0)));
+        program
+            .globals
+            .insert(GlobalId(0), ("unused".into(), u64_type(), int(6, 0)));
+        let text = canonical_text(&program);
+        assert_eq!(text.matches(" (fn ").count(), program.functions.len());
+        assert_eq!(text.matches(" (global ").count(), program.globals.len());
+        assert!(text.contains("(unreachable"));
+    }
+
+    #[test]
+    fn distinct_types_have_distinct_projections() {
+        let function_type = |ret, env| Type::Function(vec![], Rc::new(ret), Rc::new(env), false);
+        let pairs = [
+            (Type::Unit, Type::Tuple(vec![])),
+            (
+                function_type(
+                    function_type(Type::Bool, Type::Tuple(vec![Type::Field])),
+                    Type::Unit,
+                ),
+                function_type(
+                    function_type(Type::Bool, Type::Unit),
+                    Type::Tuple(vec![Type::Field]),
+                ),
+            ),
+        ];
+        let hash = |typ| {
+            let mut main = function(0, "main", &[(0, "x")], int(7, 0));
+            main.parameters[0].3 = Rc::new(typ);
+            projection_hash(&program(vec![main]))
+        };
+        for (a, b) in pairs {
+            assert_eq!(a.to_string(), b.to_string());
+            assert_ne!(hash(a), hash(b));
+        }
+    }
+
+    #[test]
+    fn assertion_payload_field_names_change_the_projection() {
+        let hash = |field| {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("src")).unwrap();
+            std::fs::write(
+                root.path().join("Nargo.toml"),
+                "[package]\nname = \"projection\"\ntype = \"bin\"\nauthors = []\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.path().join("src/main.nr"),
+                format!(
+                    "struct Foo {{ {field}: u32 }}\n\
+                     fn main(foo: Foo, x: u32) {{ assert(x == 1, f\"{{foo}}\"); }}"
+                ),
+            )
+            .unwrap();
+            let project = crate::loader::NoirProject::new(root.path().to_path_buf()).unwrap();
+            let compiled = crate::validation_frontend::compile_for_validation(&project).unwrap();
+            projection_hash(&compiled.program)
+        };
+        assert_ne!(hash("a"), hash("b"));
+    }
+
+    #[test]
     fn the_canonical_text_format_is_pinned() {
         let program = program(vec![function(0, "main", &[(4, "x")], int(7, 0))]);
         assert_eq!(
             canonical_text(&program),
-            "(program v1\n \
+            "(program v2\n \
              (fn f#0 \"main\" unconstrained=false inline=inline entry=true allow_constant_return=false visibility=Public\n  \
-             (params (l#0 mut=false \"x\" \"u64\" Private))\n  \
-             -> \"u64\"\n  \
-             (int 7 \"u64\"))\n\
+             (params (l#0 mut=false \"x\" Integer(Unsigned, SixtyFour) Private))\n  \
+             -> Integer(Unsigned, SixtyFour)\n  \
+             (int 7 Integer(Unsigned, SixtyFour)))\n\
              )\n"
         );
-        assert_eq!(projection_hash(&program).len(), 64);
     }
 }

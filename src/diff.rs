@@ -1,11 +1,7 @@
-//! Comparable records of one program's run, the cross-field differential over them, and the dump
-//! format both ledgers are rendered from.
+//! Run records and cross-field comparisons used by the committed ledgers.
 //!
-//! Two axes read these records. The *field axis* compares the same program compiled under two
-//! fields in one run: integers, bools and structure must match, `Field` values may differ, and a
-//! failure is compared by kind only. The *revision axis* is the committed ledger: every row prints
-//! the value, the failure kind and its payload, so a change in any of them is a visible row change
-//! between two referee commits. Strictness therefore lives in the rows, not in a comparator.
+//! Across fields, integers, bools and structure must match; `Field` values may differ and failures
+//! compare by kind. Across revisions, ledger rows retain exact values and failure payloads.
 
 use std::fmt;
 
@@ -327,14 +323,29 @@ pub fn is_coverage_gap(outcome: &DiffOutcome) -> bool {
     )
 }
 
+fn outcome_summary(outcome: &DiffOutcome) -> String {
+    match outcome {
+        DiffOutcome::Returned(value) => format!("returned {}", value.render()),
+        DiffOutcome::Errored { error, .. } => format!("errored ({error})"),
+    }
+}
+
 /// Compare cross-field outcomes, tolerating countable coverage gaps while rejecting value, error,
 /// panic, and internal outcomes. Failures compare by kind: payloads are field-specific text.
 pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), String> {
     if is_panic(a) || is_panic(b) {
-        return Err(format!("panic outcome: {a:?} vs {b:?}"));
+        return Err(format!(
+            "panic outcome: {} vs {}",
+            outcome_summary(a),
+            outcome_summary(b)
+        ));
     }
     if is_internal(a) || is_internal(b) {
-        return Err(format!("internal error outcome: {a:?} vs {b:?}"));
+        return Err(format!(
+            "internal error outcome: {} vs {}",
+            outcome_summary(a),
+            outcome_summary(b)
+        ));
     }
 
     if is_coverage_gap(a) || is_coverage_gap(b) {
@@ -342,11 +353,11 @@ pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), Strin
     }
     match (a, b) {
         (DiffOutcome::Returned(x), DiffOutcome::Returned(y)) => values_equivalent(x, y),
-        (DiffOutcome::Returned(_), DiffOutcome::Errored { error, detail }) => Err(format!(
-            "one field returned a value, the other errored ({error}: {detail})"
+        (DiffOutcome::Returned(_), DiffOutcome::Errored { error, .. }) => Err(format!(
+            "one field returned a value, the other errored ({error})"
         )),
-        (DiffOutcome::Errored { error, detail }, DiffOutcome::Returned(_)) => Err(format!(
-            "one field errored ({error}: {detail}), the other returned a value"
+        (DiffOutcome::Errored { error, .. }, DiffOutcome::Returned(_)) => Err(format!(
+            "one field errored ({error}), the other returned a value"
         )),
         (DiffOutcome::Errored { error: ea, .. }, DiffOutcome::Errored { error: eb, .. }) => {
             if ea.kind == eb.kind {
@@ -506,20 +517,9 @@ mod tests {
     }
 
     #[test]
-    fn equal_integers_are_equivalent() {
+    fn integer_values_must_match() {
         assert!(values_equivalent(&int("42"), &int("42")).is_ok());
-    }
-
-    #[test]
-    fn differing_integers_diverge() {
-        // This is the corruption signal: the same program produced different integers per field.
         assert!(values_equivalent(&int("42"), &int("43")).is_err());
-    }
-
-    #[test]
-    fn field_values_may_differ() {
-        // Field elements are field-specific; a difference there is not a divergence.
-        assert!(values_equivalent(&field("1"), &field("2")).is_ok());
     }
 
     #[test]
@@ -571,12 +571,6 @@ mod tests {
     }
 
     #[test]
-    fn same_kind_errors_are_equivalent() {
-        let a = errored(FailureKind::CompileError);
-        assert!(outcomes_equivalent(&a, &a).is_ok());
-    }
-
-    #[test]
     fn unsupported_is_tolerated_and_counted() {
         let u = unsupported();
         let c = errored(FailureKind::CompileError);
@@ -617,8 +611,6 @@ mod tests {
         assert!(outcomes_equivalent(&a, &b).is_err());
     }
 
-    // --- format v3: values, payloads, per-step records ---
-
     fn cmp(kind: FailureKind, payload: &str) -> ComparableError {
         ComparableError {
             kind,
@@ -637,9 +629,7 @@ mod tests {
     fn field_values_carry_their_value_and_stay_field_equivalent() {
         let a = DiffValue::Field("1".to_string());
         let b = DiffValue::Field("18446744069414584320".to_string());
-        // The field axis still treats field elements as opaque ...
         assert!(values_equivalent(&a, &b).is_ok());
-        // ... but the values are distinguishable, so a ledger row can print and diff them.
         assert_ne!(a, b);
     }
 

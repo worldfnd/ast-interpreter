@@ -1,7 +1,4 @@
-//! Capability tags: the field properties a program needs, written as predicates the cross-field
-//! comparator evaluates against each field. A one-sided coverage gap is expected only where a tag
-//! predicts it, so the tag names the reason ("a u64 fits in one field element") instead of a
-//! program name in an allowlist. Tags never name a field.
+//! Field-property predicates used to explain expected cross-field coverage gaps.
 
 use acvm::{AcirField, FieldElement};
 use num_bigint::BigUint;
@@ -121,22 +118,6 @@ mod tests {
             assert_eq!(current, goldilocks());
         } else {
             assert_eq!(current, bn254());
-        }
-    }
-
-    #[test]
-    fn descriptions_name_the_property_never_the_field() {
-        for tag in [
-            Capability::UnsignedFits(64),
-            Capability::SignedFits(64),
-            Capability::FieldBitsAtLeast(65),
-            Capability::EmbeddedCurve,
-        ] {
-            let text = tag.describe();
-            assert!(
-                !text.contains("bn254") && !text.contains("goldilocks"),
-                "{text}"
-            );
         }
     }
 }

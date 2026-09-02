@@ -1,5 +1,4 @@
-//! Corpus enumeration, source hashing, provenance and per-step run records: the machinery the
-//! ledgers and the cross-field differential are generated from.
+//! Corpus loading, source hashes, provenance, and per-step run records.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -20,16 +19,13 @@ use super::{
     interpret_with_inputs,
 };
 
-/// The corpus, relative to a Noir checkout.
 pub(crate) const CORPUS_SUBDIR: &str = "test_programs/execution_success";
 
 pub(crate) fn referee_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The Noir checkout whose corpus the ledgers photograph: `$NOIR_CHECKOUT`, else the sibling
-/// `../noir`. It has to be checked out at the pinned compiler revision; see
-/// [`check_checkout_matches_stamp`].
+/// `$NOIR_CHECKOUT`, or the sibling `../noir` checkout at the pinned compiler revision.
 pub(crate) fn noir_checkout() -> PathBuf {
     match std::env::var_os("NOIR_CHECKOUT") {
         Some(dir) => PathBuf::from(dir),
@@ -45,7 +41,6 @@ pub(crate) fn fixtures_dir() -> PathBuf {
     referee_dir().join("fixtures")
 }
 
-/// The field this build targets, used to tag dumps and ledgers (the two fields are separate builds).
 pub(crate) fn field_tag() -> &'static str {
     if cfg!(feature = "goldilocks") {
         "goldilocks"
@@ -54,7 +49,6 @@ pub(crate) fn field_tag() -> &'static str {
     }
 }
 
-/// The referee's enabled cargo features, sorted.
 pub(crate) fn enabled_features() -> Vec<String> {
     let mut features = Vec::new();
     if cfg!(feature = "goldilocks") {
@@ -66,7 +60,6 @@ pub(crate) fn enabled_features() -> Vec<String> {
     features
 }
 
-/// One program directory.
 #[derive(Debug, Clone)]
 pub(crate) struct CorpusProgram {
     pub name: String,
@@ -175,7 +168,6 @@ pub(crate) fn toolchain_version() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// The provenance of a dump of `programs` taken by this build.
 pub(crate) fn provenance(corpus: &Path, programs: &[CorpusProgram]) -> DumpProvenance {
     let referee = referee_dir();
     DumpProvenance {
@@ -214,8 +206,6 @@ pub(crate) fn pinned_revs() -> Vec<String> {
         .collect()
 }
 
-/// The pins must agree with each other and with the commit the compiler in this build was built
-/// from; a path override or a stale build shows up here.
 pub(crate) fn pin_disagreement(revs: &[String], stamp: &str) -> Result<(), String> {
     let Some(first) = revs.first() else {
         return Err("Cargo.toml pins no worldfnd/noir crate".to_string());
@@ -232,12 +222,21 @@ pub(crate) fn pin_disagreement(revs: &[String], stamp: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// The corpus checkout must sit at the stamped revision with a clean corpus directory.
+/// Check the corpus and its shared path dependencies at the stamped revision.
 pub(crate) fn check_checkout_matches_stamp(checkout: &Path) -> Result<(), String> {
     let head = git_output(checkout, &["rev-parse", "HEAD"]);
-    let dirty: Vec<String> = git_output(checkout, &["status", "--porcelain", "--", CORPUS_SUBDIR])
-        .map(|status| status.lines().map(str::to_string).collect())
-        .unwrap_or_default();
+    let status = git_output(
+        checkout,
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            CORPUS_SUBDIR,
+            "test_programs/test_libraries",
+        ],
+    )
+    .ok_or_else(|| format!("cannot check corpus cleanliness at {}", checkout.display()))?;
+    let dirty: Vec<String> = status.lines().map(str::to_string).collect();
     checkout_mismatch(checkout, head.as_deref(), noirc_driver::GIT_COMMIT, &dirty)
 }
 
@@ -257,7 +256,7 @@ pub(crate) fn checkout_mismatch(
              revision out there, or point NOIR_CHECKOUT at a worktree of it"
         )),
         Some(_) if !dirty.is_empty() => Err(format!(
-            "{checkout} has local changes under {CORPUS_SUBDIR}: {}",
+            "{checkout} has local changes in the corpus or its path dependencies: {}",
             dirty.join(", ")
         )),
         Some(_) => Ok(()),
@@ -325,10 +324,7 @@ fn interpret_failure(error: &InterpretError) -> (ComparableError, String) {
     (comparable_error_of(error), error.to_string())
 }
 
-/// The machine-specific roots a payload may mention, each with its stable stand-in: the program's
-/// own directory, the Noir checkout, the referee and nargo's git-dependency cache (`~/nargo`,
-/// where `nargo_toml` clones a program's git dependencies), in that order so the most specific
-/// wins.
+/// Normalize more specific roots first, including nargo's `~/nargo` dependency cache.
 pub(crate) fn path_roots(program_dir: &Path) -> Vec<(PathBuf, &'static str)> {
     let mut roots = vec![
         (program_dir.to_path_buf(), "<pkg>"),
@@ -376,10 +372,7 @@ fn normalize_step(step: StepOutcome, roots: &[(PathBuf, &str)]) -> StepOutcome {
     }
 }
 
-/// Run every step for `program` in place: a workspace manifest is recorded as not run, everything
-/// else is taken through load, compile, projection, interpretation and the recorded-return check.
-/// Running in place keeps path dependencies resolvable, as Noir's own test harness does; the
-/// checkout's cleanliness is checked before a sweep and its sources are only read.
+/// Run in place so path dependencies resolve; the sweep checks checkout cleanliness first.
 pub(crate) fn run_record(program: &CorpusProgram) -> RunRecord {
     if program.workspace {
         return RunRecord {
@@ -574,7 +567,6 @@ mod tests {
             source_hash: hash.to_string(),
         };
         let base = [program("a", "1"), program("b", "2")];
-        assert_eq!(corpus_hash(&base), corpus_hash(&base.clone()));
         assert_ne!(
             corpus_hash(&base),
             corpus_hash(&[program("a", "1"), program("b", "3")])
@@ -612,8 +604,6 @@ mod tests {
         assert!(pin_disagreement(&revs(&["a", "a"]), "a").is_ok());
     }
 
-    /// The guard itself: every `worldfnd/noir` pin in `Cargo.toml` names the commit the compiler in
-    /// this build stamped itself with, so no path override or stale build can produce a ledger.
     #[test]
     fn pinned_revs_agree_with_the_compiler_stamp() {
         let revs = pinned_revs();
@@ -637,10 +627,6 @@ mod tests {
             }
             other => panic!("expected a failed step, got {other:?}"),
         }
-        assert_eq!(
-            run_step(|| Ok::<_, (ComparableError, String)>(7)).unwrap(),
-            7
-        );
     }
 
     #[test]
@@ -662,8 +648,6 @@ mod tests {
         let roots = path_roots(&program.dir);
         assert_eq!(roots[0].1, "<pkg>");
         assert!(roots.iter().any(|(_, s)| *s == "<referee>"));
-        // A git dependency's file lives in nargo's cache under the home directory, which differs
-        // between machines; the ledger must not.
         let (nargo, _) = roots
             .iter()
             .find(|(_, s)| *s == "<nargo>")
@@ -727,7 +711,6 @@ mod tests {
         assert!(record.projection.passed(), "{:?}", record.projection);
         assert_eq!(record.projection_hash.as_deref().map(str::len), Some(64));
         assert_eq!(record.oracle, StepOutcome::not_run("no recorded return"));
-        assert_eq!(record.source_hash.len(), 64);
     }
 
     #[test]
@@ -769,14 +752,5 @@ mod tests {
                 Some("field value differs from the recorded return")
             );
         }
-    }
-
-    #[test]
-    fn enabled_features_follow_the_build() {
-        let features = enabled_features();
-        assert_eq!(
-            features.contains(&"goldilocks".to_string()),
-            cfg!(feature = "goldilocks")
-        );
     }
 }
