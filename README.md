@@ -3,8 +3,7 @@
 A small Rust interpreter for Noir's monomorphized AST (`noirc_frontend::monomorphization::ast`).
 
 It runs over bn254 or Goldilocks and compares field-independent values such as integers, booleans,
-arrays, tuples, and structs. Cross-field comparisons ignore differences in `Field` values;
-per-field ledgers record their exact values.
+arrays, tuples, and structs. Cross-field comparisons ignore differences in `Field` values.
 
 ## Using it
 
@@ -39,19 +38,18 @@ cargo build
 make test            # Tests under bn254 and Goldilocks
 ```
 
-## The ledgers
+## STATUS.md
 
-The three files in `ledger/` record the pinned compiler's behavior on Noir's `execution_success`
-corpus and this crate's fixtures. Per-field rows include each run step, errors, returned values,
-and a hash of the monomorphized AST. `cross-field.md` records agreements, expected gaps, and
-divergences. Known compiler failures remain visible in the baseline.
-
-CI regenerates the ledgers and fails on changes. Intentional changes need updated rows and an
-explanation in the PR. Full JSON dumps are saved to `target/ledger/` and uploaded as CI artifacts.
+`STATUS.md` records the pinned compiler's behavior on Noir's `execution_success` corpus and this
+crate's fixtures: one row per program with the compile, run and recorded-return checks under each
+field, the cross-field verdict, whether both monomorphized ASTs project to the same hash, and a
+fingerprint of the underlying records. CI regenerates the file and fails on changes; intentional
+changes need the updated rows and an explanation in the PR. The full JSON dumps are written to
+`target/status/` and uploaded as CI artifacts.
 
 ```sh
-make ledger          # Sweep both fields and compare; about 7 minutes per sweep
-make ledger-check    # Regenerate and check against the committed ledgers
+make status          # Sweep both fields and render STATUS.md; about 7 minutes per sweep
+make status-check    # Regenerate and compare with the committed STATUS.md
 ```
 
 The sweep uses `../noir`, or the checkout specified by `NOIR_CHECKOUT`. Its revision must match

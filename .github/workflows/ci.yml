@@ -59,27 +59,16 @@ jobs:
       - name: Fixture suite
         working-directory: ast-interpreter
         run: cargo test --locked ${{ matrix.features }}
-      - name: Generate the ledger
+      - name: Record the corpus
         working-directory: ast-interpreter
         run: make sweep FIELD=${{ matrix.field }}
-      - name: The committed ledger matches the fresh one
-        working-directory: ast-interpreter
-        run: git diff --exit-code -- ledger/${{ matrix.field }}.md
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
         with:
           name: dump-${{ matrix.field }}
-          path: ast-interpreter/target/ledger/${{ matrix.field }}.json
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
-        with:
-          name: ledger-${{ matrix.field }}
-          path: ast-interpreter/ledger/${{ matrix.field }}.md
-          if-no-files-found: ignore
+          path: ast-interpreter/target/status/${{ matrix.field }}.json
 
-  cross-field:
-    name: cross-field
+  status:
+    name: status
     needs: field
     runs-on: ubuntu-latest
     steps:
@@ -95,16 +84,15 @@ jobs:
         with:
           pattern: dump-*
           merge-multiple: true
-          path: ast-interpreter/target/ledger
-      - name: Compare the two field dumps
+          path: ast-interpreter/target/status
+      - name: Render STATUS.md
         working-directory: ast-interpreter
-        run: make compare
-      - name: The committed cross-field ledger matches the fresh one
+        run: make render
+      - name: The committed STATUS.md matches the fresh one
         working-directory: ast-interpreter
-        run: git diff --exit-code -- ledger/cross-field.md
+        run: git diff --exit-code -- STATUS.md
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: ledger-cross-field
-          path: ast-interpreter/ledger/cross-field.md
-          if-no-files-found: ignore
+          name: status
+          path: ast-interpreter/STATUS.md

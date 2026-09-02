@@ -1,7 +1,7 @@
-//! Run records and cross-field comparisons used by the committed ledgers.
+//! Run records and cross-field comparisons behind the committed `STATUS.md`.
 //!
 //! Across fields, integers, bools and structure must match; `Field` values may differ and failures
-//! compare by kind. Across revisions, ledger rows retain exact values and failure payloads.
+//! compare by kind. Across revisions, the records keep exact values and failure payloads.
 
 use std::fmt;
 
@@ -16,7 +16,7 @@ use super::value::{Value, field_to_bigint};
 pub const DUMP_FORMAT_VERSION: u32 = 3;
 
 /// A field-independent encoding of an interpreter [`Value`]. `Field` carries its canonical value
-/// as a decimal string for the ledger; the field-axis comparison still treats it as opaque.
+/// as a decimal string; the field-axis comparison still treats it as opaque.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffValue {
     Field(String),
@@ -60,7 +60,7 @@ impl DiffValue {
         }
     }
 
-    /// A compact single-line rendering for ledger rows: `7u64`, `[1u8, 2u8]`, `(true, 3)`.
+    /// A compact single-line rendering: `7u64`, `[1u8, 2u8]`, `(true, 3)`.
     pub fn render(&self) -> String {
         match self {
             DiffValue::Field(v) => v.clone(),
@@ -148,7 +148,7 @@ impl fmt::Display for ComparableError {
 }
 
 /// The outcome of interpreting one program under one field, ready to serialize and diff. `detail`
-/// on `Errored` is human-readable triage text only: it is never compared and never in a ledger.
+/// on `Errored` is triage text only: never compared, never in `STATUS.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffOutcome {
     Returned(DiffValue),
@@ -239,7 +239,7 @@ impl StepOutcome {
         }
     }
 
-    /// The ledger cell for this step: `ok`, `FAIL <kind>: <payload>` or `n/a: <reason>`.
+    /// `ok`, `FAIL <kind>: <payload>` or `n/a: <reason>`.
     pub fn render(&self) -> String {
         match self {
             StepOutcome::Passed => "ok".to_string(),
@@ -372,7 +372,7 @@ pub fn outcome_is_tolerated(a: &DiffOutcome, b: &DiffOutcome) -> bool {
         && (is_coverage_gap(a) || is_coverage_gap(b))
 }
 
-/// What a dump was built from, so mismatched dumps are refused. The ledger header prints the
+/// What a dump was built from, so mismatched dumps are refused. `STATUS.md` prints the
 /// reproducible subset; `interpreter_rev`, `interpreter_dirty`, `corpus_dir` and `built_at` stay
 /// in the JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

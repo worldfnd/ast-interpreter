@@ -22,11 +22,11 @@ mod capability;
 #[cfg(test)]
 mod corpus;
 #[cfg(test)]
-mod ledger;
-#[cfg(test)]
 mod loader;
 #[cfg(test)]
 mod noir_oracle;
+#[cfg(test)]
+mod status;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

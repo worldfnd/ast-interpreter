@@ -2,7 +2,7 @@ export NOIR_CHECKOUT ?= $(CURDIR)/../noir
 CARGO ?= cargo
 FIELD ?= bn254
 
-.PHONY: test sweep compare ledger ledger-check
+.PHONY: test sweep render status status-check
 
 test:
 	$(CARGO) test --locked
@@ -10,15 +10,15 @@ test:
 
 sweep:
 	@case "$(FIELD)" in bn254|goldilocks) ;; *) echo "FIELD must be bn254 or goldilocks" >&2; exit 1 ;; esac
-	$(CARGO) test --locked --lib $(if $(filter goldilocks,$(FIELD)),--features goldilocks) ledger::dump_ledger -- --exact --ignored --nocapture
+	$(CARGO) test --locked --lib $(if $(filter goldilocks,$(FIELD)),--features goldilocks) status::dump_records -- --exact --ignored --nocapture
 
-compare:
-	$(CARGO) test --locked --lib ledger::cross_field_diff -- --exact --ignored --nocapture
+render:
+	$(CARGO) test --locked --lib status::render_status_file -- --exact --ignored --nocapture
 
-ledger:
+status:
 	$(MAKE) sweep FIELD=bn254
 	$(MAKE) sweep FIELD=goldilocks
-	$(MAKE) compare
+	$(MAKE) render
 
-ledger-check: ledger
-	git diff --exit-code --stat HEAD -- ledger/
+status-check: status
+	git diff --exit-code --stat HEAD -- STATUS.md

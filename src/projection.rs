@@ -12,7 +12,7 @@ use noirc_frontend::token::FmtStrFragment;
 use noirc_printable_type::PrintableType;
 use sha2::{Digest, Sha256};
 
-/// The projection's format version; part of every dump and ledger header.
+/// The projection's format version; part of every dump and of `STATUS.md`.
 pub const PROJECTION_VERSION: u32 = 2;
 
 /// The SHA-256 of [`canonical_text`], as lowercase hex.
