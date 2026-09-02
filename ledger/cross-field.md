@@ -7,7 +7,7 @@ Integers, bools and structure must agree; `Field` values may differ; failures co
 | format | 3 |
 | projection | 2 |
 | noir_rev | 7db2450226e64bed450e65d55ec4f833e7cc498b |
-| corpus_hash | b7b1c07fad362d06e8a05381cc4cb5683d87bb21503a937a2f8dd467c81f6a36 |
+| corpus_hash | 3ad62c2ccd6466555cdc14ba75992a0fdbb31beb14fec9fc46f62680576ebc7a |
 | programs | 509 |
 | toolchain | rustc 1.89.0 (29483883e 2025-08-04) |
 | bn254 modulus | 21888242871839275222246405745257275088548364400416034343698204186575808495617 |
@@ -253,7 +253,7 @@ Integers, bools and structure must agree; `Field` values may differ; failures co
 | no_predicates_numeric_generic_poseidon | Unsupported(intrinsic) | DependencyCompileGap |  | gap: both sides | Unsupported(intrinsic) / DependencyCompileGap |
 | numeric_type_alias | returned | returned | same | equal |  |
 | op_assign_desugaring | returned | returned | same | equal |  |
-| overlapping_dep_and_mod | not run | n/a: workspace manifest: the referee runs single-package programs |  | not run | workspace manifest: the referee runs single-package programs |
+| overlapping_dep_and_mod | n/a: workspace manifest: the referee runs single-package programs | n/a: workspace manifest: the referee runs single-package programs |  | not run | workspace manifest: the referee runs single-package programs |
 | pedersen_check | Unsupported(intrinsic) | Panic |  | DIVERGENCE | panic: panic outcome: errored (Unsupported(intrinsic): intrinsic 'field_less_than') vs errored (Panic: inter…#98681453 |
 | pedersen_commitment | Unsupported(intrinsic) | Panic |  | DIVERGENCE | panic: panic outcome: errored (Unsupported(intrinsic): intrinsic 'field_less_than') vs errored (Panic: inter…#98681453 |
 | pedersen_hash | Unsupported(intrinsic) | Panic |  | DIVERGENCE | panic: panic outcome: errored (Unsupported(intrinsic): intrinsic 'derive_pedersen_generators') vs errored (P…#e15bfa4f |
@@ -521,8 +521,8 @@ Integers, bools and structure must agree; `Field` values may differ; failures co
 | while_loop_break_regression_8521 | returned | returned | same | equal |  |
 | wildcard_type | returned | returned | same | equal |  |
 | witness_compression | returned | returned | same | equal |  |
-| workspace | not run | n/a: workspace manifest: the referee runs single-package programs |  | not run | workspace manifest: the referee runs single-package programs |
-| workspace_default_member | not run | n/a: workspace manifest: the referee runs single-package programs |  | not run | workspace manifest: the referee runs single-package programs |
+| workspace | n/a: workspace manifest: the referee runs single-package programs | n/a: workspace manifest: the referee runs single-package programs |  | not run | workspace manifest: the referee runs single-package programs |
+| workspace_default_member | n/a: workspace manifest: the referee runs single-package programs | n/a: workspace manifest: the referee runs single-package programs |  | not run | workspace manifest: the referee runs single-package programs |
 | wrapping_operations | returned | DependencyCompileGap |  | gap: dependency | goldilocks: program reaches dependency code from files that failed elaboration under the chosen field: std/c…#2945c5c0 |
 | xor | returned | returned | same | equal |  |
 | zeroed_array_of_references | returned | returned | same | equal |  |

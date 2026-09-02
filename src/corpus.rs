@@ -86,17 +86,11 @@ pub(crate) fn list_programs(root: &Path) -> Vec<CorpusProgram> {
     programs
 }
 
-/// SHA-256 over the program's `Nargo.toml`, `Prover.toml` and `src/**`: each file as its
-/// `/`-separated relative path, its length and its bytes, in path order. Build output and any
-/// other file are ignored.
-pub(crate) fn source_hash(dir: &Path) -> String {
+/// SHA-256 over every file under `dir` except build output, as `/`-separated relative path,
+/// length and bytes, in path order.
+fn source_hash(dir: &Path) -> String {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    for name in ["Nargo.toml", "Prover.toml"] {
-        if let Ok(bytes) = std::fs::read(dir.join(name)) {
-            files.push((name.to_string(), bytes));
-        }
-    }
-    collect_files(&dir.join("src"), "src", &mut files);
+    collect_files(dir, "", &mut files);
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut hasher = Sha256::new();
     for (path, bytes) in &files {
@@ -115,9 +109,15 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
     for entry in entries {
         let path = entry.expect("source entry").path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let relative = format!("{prefix}/{name}");
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         if path.is_dir() {
-            collect_files(&path, &relative, out);
+            if name != "target" {
+                collect_files(&path, &relative, out);
+            }
         } else {
             out.push((relative, std::fs::read(&path).expect("read source file")));
         }
@@ -524,33 +524,23 @@ mod tests {
     }
 
     #[test]
-    fn source_hash_covers_manifest_inputs_and_sources_only() {
+    fn source_hash_covers_every_file_but_build_output() {
         let a = tempfile::tempdir().unwrap();
         write(a.path(), "src/main.nr", "fn main() {}");
         write(a.path(), "Nargo.toml", "[package]");
-        write(a.path(), "Prover.toml", "x = 1");
+        write(a.path(), "crate1/src/lib.nr", "");
         let b = tempfile::tempdir().unwrap();
-        write(b.path(), "Prover.toml", "x = 1");
+        write(b.path(), "crate1/src/lib.nr", "");
         write(b.path(), "Nargo.toml", "[package]");
         write(b.path(), "src/main.nr", "fn main() {}");
         write(b.path(), "target/out.json", "{}");
-        write(b.path(), "README.md", "ignored");
         assert_eq!(source_hash(a.path()), source_hash(b.path()));
 
-        write(b.path(), "src/lib.nr", "");
-        assert_ne!(
-            source_hash(a.path()),
-            source_hash(b.path()),
-            "an added source file must change the hash"
-        );
-        write(a.path(), "src/lib.nr", "");
-        assert_eq!(source_hash(a.path()), source_hash(b.path()));
+        write(b.path(), "crate1/src/lib.nr", "fn f() {}");
+        assert_ne!(source_hash(a.path()), source_hash(b.path()));
+        write(a.path(), "crate1/src/lib.nr", "fn f() {}");
         write(a.path(), "Prover.toml", "x = 2");
-        assert_ne!(
-            source_hash(a.path()),
-            source_hash(b.path()),
-            "an edited input must change the hash"
-        );
+        assert_ne!(source_hash(a.path()), source_hash(b.path()));
     }
 
     #[test]
