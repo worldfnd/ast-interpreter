@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pin:
+    name: Read the Noir pin
+    runs-on: ubuntu-latest
+    outputs:
+      rev: ${{ steps.pin.outputs.rev }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The eleven noir crates pin one revision
+        id: pin
+        run: |
+          revs=$(grep -o 'github.com/worldfnd/noir.git", rev = "[0-9a-f]*"' Cargo.toml | grep -o '[0-9a-f]\{40\}' | sort -u)
+          count=$(echo "$revs" | wc -l | tr -d ' ')
+          if [ "$count" != "1" ]; then
+            echo "Cargo.toml pins more than one noir revision:"; echo "$revs"; exit 1
+          fi
+          echo "rev=$revs" >> "$GITHUB_OUTPUT"
+
+  field:
+    name: ${{ matrix.field }}
+    needs: pin
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - field: bn254
+            features: ""
+          - field: goldilocks
+            features: --features goldilocks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ast-interpreter
+      # The corpus is the sibling noir checkout at the pinned revision; the sweep refuses any other.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: worldfnd/noir
+          ref: ${{ needs.pin.outputs.rev }}
+          path: noir
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: ast-interpreter
+          key: ${{ matrix.field }}
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - name: Fixture suite
+        working-directory: ast-interpreter
+        run: cargo test --locked ${{ matrix.features }}
+      - name: Photograph the corpus
+        working-directory: ast-interpreter
+        run: just sweep ${{ matrix.field }}
+      - name: The committed ledger matches the fresh one
+        working-directory: ast-interpreter
+        run: git diff --exit-code -- ledger/${{ matrix.field }}.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: dump-${{ matrix.field }}
+          path: ast-interpreter/target/ledger/${{ matrix.field }}.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: ledger-${{ matrix.field }}
+          path: ast-interpreter/ledger/${{ matrix.field }}.md
+          if-no-files-found: ignore
+
+  cross-field:
+    name: cross-field
+    needs: field
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ast-interpreter
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: ast-interpreter
+          key: bn254
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: dump-*
+          merge-multiple: true
+          path: ast-interpreter/target/ledger
+      - name: Compare the two field dumps
+        working-directory: ast-interpreter
+        run: just compare
+      - name: The committed cross-field ledger matches the fresh one
+        working-directory: ast-interpreter
+        run: git diff --exit-code -- ledger/cross-field.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: ledger-cross-field
+          path: ast-interpreter/ledger/cross-field.md
+          if-no-files-found: ignore
