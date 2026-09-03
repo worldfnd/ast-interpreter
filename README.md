@@ -40,12 +40,12 @@ make test            # Tests under bn254 and Goldilocks
 
 ## STATUS.md
 
-`STATUS.md` records the pinned compiler's behavior on Noir's `execution_success` corpus and this
-crate's fixtures: one row per program with the compile, run and recorded-return checks under each
-field, the cross-field verdict, whether both monomorphized ASTs project to the same hash, and a
-fingerprint of the underlying records. CI regenerates the file and fails on changes; intentional
-changes need the updated rows and an explanation in the PR. The full JSON dumps are written to
-`target/status/` and uploaded as CI artifacts.
+`STATUS.md` records what the pinned compiler and this interpreter do on Noir's `execution_success`
+corpus and this crate's fixtures: one row per program with the compile, run and recorded-return
+checks under each field, the cross-field verdict, whether both monomorphized ASTs project to the
+same hash, and a fingerprint of the underlying records. CI regenerates the file and fails on
+changes; intentional changes need the updated rows and an explanation in the PR. The full JSON
+dumps are written to `target/status/` and uploaded as CI artifacts.
 
 ```sh
 make status          # Sweep both fields and render STATUS.md; about 7 minutes per sweep
@@ -54,7 +54,8 @@ make status-check    # Regenerate and compare with the committed STATUS.md
 
 The sweep uses `../noir`, or the checkout specified by `NOIR_CHECKOUT`. Its revision must match
 the compiler pin in `Cargo.toml`, and the corpus and its path dependencies must be clean.
-Change the compiler pin and interpreter code in separate PRs unless a compiler API change requires both.
+Change the compiler pin and interpreter code in separate PRs unless a compiler API change
+requires both.
 
 `tests::oracle_survey_execution_success` separately compares the interpreter with Noir's executor;
 its doc comment has the command. Unsupported intrinsics, including `field_less_than`,

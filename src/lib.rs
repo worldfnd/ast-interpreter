@@ -36,8 +36,8 @@ mod value_proptest;
 
 pub use diff::{
     ComparableError, CrossFieldDump, DUMP_FORMAT_VERSION, DiffOutcome, DiffValue, DumpProvenance,
-    FailureKind, RunRecord, StepOutcome, comparable_error_of, failure_kind_of,
-    outcome_is_tolerated, outcomes_equivalent, values_equivalent,
+    FailureKind, RunRecord, StepOutcome, comparable_error_of, outcome_is_tolerated,
+    outcomes_equivalent, values_equivalent,
 };
 pub use error::InterpretError;
 pub use input::{expected_return_from_prover_toml, inputs_from_prover_toml};

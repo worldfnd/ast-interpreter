@@ -59,22 +59,24 @@ impl DiffValue {
             Value::Ref(cell, _) => DiffValue::from_value(&cell.borrow()),
         }
     }
+}
 
-    /// A compact single-line rendering: `7u64`, `[1u8, 2u8]`, `(true, 3)`.
-    pub fn render(&self) -> String {
+/// A compact single-line rendering: `7u64`, `[1u8, 2u8]`, `(true, 3)`.
+impl fmt::Display for DiffValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DiffValue::Field(v) => v.clone(),
+            DiffValue::Field(v) => f.write_str(v),
             DiffValue::Int {
                 signed,
                 bits,
                 value,
-            } => format!("{value}{}{bits}", if *signed { 'i' } else { 'u' }),
-            DiffValue::Bool(b) => b.to_string(),
-            DiffValue::Unit => "()".to_string(),
-            DiffValue::Str(s) => format!("{s:?}"),
-            DiffValue::Array(xs) => format!("[{}]", render_list(xs)),
-            DiffValue::Tuple(xs) => format!("({})", render_list(xs)),
-            DiffValue::Function => "fn".to_string(),
+            } => write!(f, "{value}{}{bits}", if *signed { 'i' } else { 'u' }),
+            DiffValue::Bool(b) => write!(f, "{b}"),
+            DiffValue::Unit => f.write_str("()"),
+            DiffValue::Str(s) => write!(f, "{s:?}"),
+            DiffValue::Array(xs) => write!(f, "[{}]", render_list(xs)),
+            DiffValue::Tuple(xs) => write!(f, "({})", render_list(xs)),
+            DiffValue::Function => f.write_str("fn"),
         }
     }
 }
@@ -82,7 +84,7 @@ impl DiffValue {
 fn render_list(values: &[DiffValue]) -> String {
     values
         .iter()
-        .map(DiffValue::render)
+        .map(DiffValue::to_string)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -105,7 +107,8 @@ pub enum FailureKind {
     ValueOutOfRange,
     TypeError,
     Internal,
-    /// The compiler or interpreter panicked; never equivalent to a non-panic outcome.
+    /// The compiler or interpreter panicked; never equivalent to any outcome, another panic
+    /// included.
     Panic,
     /// The interpreter's return disagrees with the `return` recorded in `Prover.toml`. Only ever a
     /// step outcome: the program's verdict stays the value it returned.
@@ -181,11 +184,6 @@ pub fn comparable_error_of(error: &InterpretError) -> ComparableError {
     ComparableError::new(kind, normalize_text(payload))
 }
 
-/// The comparable kind of an [`InterpretError`], without its payload.
-pub fn failure_kind_of(error: &InterpretError) -> FailureKind {
-    comparable_error_of(error).kind
-}
-
 /// The construct kind is the head of an `Unsupported` message, before any name, value or detail.
 pub(crate) fn normalize_construct(msg: &str) -> String {
     msg.split([':', '\'', '('])
@@ -238,13 +236,15 @@ impl StepOutcome {
             _ => None,
         }
     }
+}
 
-    /// `ok`, `FAIL <kind>: <payload>` or `n/a: <reason>`.
-    pub fn render(&self) -> String {
+/// `ok`, `FAIL <kind>: <payload>` or `n/a: <reason>`.
+impl fmt::Display for StepOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StepOutcome::Passed => "ok".to_string(),
-            StepOutcome::Failed { error, .. } => format!("FAIL {error}"),
-            StepOutcome::NotRun { reason } => format!("n/a: {reason}"),
+            StepOutcome::Passed => f.write_str("ok"),
+            StepOutcome::Failed { error, .. } => write!(f, "FAIL {error}"),
+            StepOutcome::NotRun { reason } => write!(f, "n/a: {reason}"),
         }
     }
 }
@@ -252,7 +252,7 @@ impl StepOutcome {
 /// One program's run, step by step; each step runs under its own panic guard.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
-    /// Hash of the program's normalized sources (`Nargo.toml`, `Prover.toml`, `src/**`).
+    /// SHA-256 over the program's git-tracked files.
     pub source_hash: String,
     pub load: StepOutcome,
     pub compile: StepOutcome,
@@ -316,13 +316,14 @@ pub(crate) fn is_coverage_gap(outcome: &DiffOutcome) -> bool {
 
 fn outcome_summary(outcome: &DiffOutcome) -> String {
     match outcome {
-        DiffOutcome::Returned(value) => format!("returned {}", value.render()),
+        DiffOutcome::Returned(value) => format!("returned {value}"),
         DiffOutcome::Errored { error, .. } => format!("errored ({error})"),
     }
 }
 
-/// Compare cross-field outcomes, tolerating countable coverage gaps while rejecting value, error,
-/// panic, and internal outcomes. Failures compare by kind: payloads are field-specific text.
+/// Cross-field equivalence: a panic or internal error on either side never passes and a coverage
+/// gap on either side always does; otherwise values must be equivalent and failures must share a
+/// kind, since payloads are field-specific text.
 pub fn outcomes_equivalent(a: &DiffOutcome, b: &DiffOutcome) -> Result<(), String> {
     if is_panic(a) || is_panic(b) {
         return Err(format!(
@@ -372,9 +373,9 @@ pub fn outcome_is_tolerated(a: &DiffOutcome, b: &DiffOutcome) -> bool {
         && (is_coverage_gap(a) || is_coverage_gap(b))
 }
 
-/// What a dump was built from, so mismatched dumps are refused. `STATUS.md` prints the
-/// reproducible subset; `interpreter_rev`, `interpreter_dirty`, `corpus_dir` and `built_at` stay
-/// in the JSON.
+/// What a dump was built from, so mismatched dumps are refused. `STATUS.md` prints `noir_rev`,
+/// `corpus_hash`, `program_count`, `toolchain` and the two format versions; the rest stays in the
+/// JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DumpProvenance {
     pub format_version: u32,
@@ -389,9 +390,9 @@ pub struct DumpProvenance {
     /// Hash over every program's `source_hash`, in name order.
     pub corpus_hash: String,
     pub program_count: usize,
-    /// `rustc --version` of the toolchain that built the referee and the compiler.
+    /// `rustc --version` of the toolchain that built the interpreter and the compiler.
     pub toolchain: String,
-    /// The referee's enabled cargo features, sorted.
+    /// The cargo features the dump was built with.
     pub features: Vec<String>,
     pub built_at: String,
 }
@@ -400,11 +401,11 @@ pub struct DumpProvenance {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrossFieldDump {
     pub provenance: DumpProvenance,
-    /// Records in program-name order.
+    /// Corpus records in name order, then fixture records (`fixtures/` prefix) in name order.
     pub records: Vec<(String, RunRecord)>,
 }
 
-/// Parse a dump, refusing any format version but the current one by name.
+/// Parse a dump, refusing any other format version.
 #[cfg(test)]
 pub(crate) fn parse_dump(json: &str) -> Result<CrossFieldDump, String> {
     #[derive(Deserialize)]
@@ -419,7 +420,7 @@ pub(crate) fn parse_dump(json: &str) -> Result<CrossFieldDump, String> {
         serde_json::from_str(json).map_err(|e| format!("dump has no readable provenance: {e}"))?;
     if probe.provenance.format_version != DUMP_FORMAT_VERSION {
         return Err(format!(
-            "dump is format {}; this referee expects {DUMP_FORMAT_VERSION} (regenerate it under both fields)",
+            "dump is format {}; this build expects {DUMP_FORMAT_VERSION} (regenerate it under both fields)",
             probe.provenance.format_version
         ));
     }
@@ -430,7 +431,6 @@ pub(crate) fn parse_dump(json: &str) -> Result<CrossFieldDump, String> {
 /// `Field` values may differ.
 pub fn values_equivalent(a: &DiffValue, b: &DiffValue) -> Result<(), String> {
     match (a, b) {
-        // Field values are field-specific; any difference there is expected.
         (DiffValue::Field(_), DiffValue::Field(_)) => Ok(()),
         (DiffValue::Function, DiffValue::Function) => Ok(()),
         (DiffValue::Unit, DiffValue::Unit) => Ok(()),

@@ -24,9 +24,8 @@ jobs:
         id: pin
         run: |
           revs=$(grep -o 'github.com/worldfnd/noir.git", rev = "[0-9a-f]*"' Cargo.toml | grep -o '[0-9a-f]\{40\}' | sort -u)
-          count=$(echo "$revs" | wc -l | tr -d ' ')
-          if [ "$count" != "1" ]; then
-            echo "Cargo.toml pins more than one noir revision:"; echo "$revs"; exit 1
+          if [ -z "$revs" ] || [ "$(echo "$revs" | wc -l | tr -d ' ')" != "1" ]; then
+            echo "Cargo.toml must pin exactly one noir revision:"; echo "$revs"; exit 1
           fi
           echo "rev=$revs" >> "$GITHUB_OUTPUT"
 
@@ -51,7 +50,9 @@ jobs:
           repository: worldfnd/noir
           ref: ${{ needs.pin.outputs.rev }}
           path: noir
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
+        with:
+          toolchain: 1.89.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ast-interpreter
@@ -59,7 +60,7 @@ jobs:
       - name: Fixture suite
         working-directory: ast-interpreter
         run: cargo test --locked ${{ matrix.features }}
-      - name: Record the corpus
+      - name: Sweep the corpus and fixtures
         working-directory: ast-interpreter
         run: make sweep FIELD=${{ matrix.field }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -68,14 +69,15 @@ jobs:
           path: ast-interpreter/target/status/${{ matrix.field }}.json
 
   status:
-    name: status
     needs: field
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: ast-interpreter
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
+        with:
+          toolchain: 1.89.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ast-interpreter

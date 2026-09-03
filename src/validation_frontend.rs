@@ -67,6 +67,8 @@ impl std::fmt::Display for ValidationError {
     }
 }
 
+impl std::error::Error for ValidationError {}
+
 /// The messages of the error and bug diagnostics in `diagnostics`, joined into one line.
 fn diagnostic_summary(diagnostics: &[CustomDiagnostic]) -> String {
     let messages: Vec<&str> = diagnostics
@@ -76,8 +78,6 @@ fn diagnostic_summary(diagnostics: &[CustomDiagnostic]) -> String {
         .collect();
     messages.join(" | ")
 }
-
-impl std::error::Error for ValidationError {}
 
 /// Run the Noir frontend through monomorphization and return the mono-AST + ABI.
 ///

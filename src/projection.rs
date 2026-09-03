@@ -1,4 +1,5 @@
-//! Fingerprint monomorphized programs, ignoring source locations, debug data and item IDs.
+//! Fingerprint monomorphized programs. The canonical text drops locations, debug data and
+//! identifier-use ids and numbers functions, globals and locals by first encounter from `main`.
 //! Bump [`PROJECTION_VERSION`] whenever the canonical format changes.
 
 use std::collections::{HashMap, VecDeque};

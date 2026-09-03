@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use acvm::{AcirField, FieldElement};
+use fm::NormalizePath;
 use sha2::{Digest, Sha256};
 
 use super::diff::{
@@ -21,7 +22,7 @@ use super::{
 
 const CORPUS_SUBDIR: &str = "test_programs/execution_success";
 
-pub(crate) fn referee_dir() -> PathBuf {
+pub(crate) fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -29,7 +30,7 @@ pub(crate) fn referee_dir() -> PathBuf {
 pub(crate) fn noir_checkout() -> PathBuf {
     match std::env::var_os("NOIR_CHECKOUT") {
         Some(dir) => PathBuf::from(dir),
-        None => referee_dir().join("../noir"),
+        None => crate_dir().join("../noir"),
     }
 }
 
@@ -38,7 +39,7 @@ pub(crate) fn corpus_dir() -> PathBuf {
 }
 
 pub(crate) fn fixtures_dir() -> PathBuf {
-    referee_dir().join("fixtures")
+    crate_dir().join("fixtures")
 }
 
 pub(crate) fn field_tag() -> &'static str {
@@ -61,7 +62,7 @@ fn enabled_features() -> Vec<String> {
 pub(crate) struct CorpusProgram {
     pub name: String,
     pub dir: PathBuf,
-    /// `Nargo.toml` declares a workspace; the referee runs single-package programs only.
+    /// `Nargo.toml` declares a workspace; the interpreter runs single-package programs only.
     pub workspace: bool,
     pub source_hash: String,
 }
@@ -86,42 +87,31 @@ pub(crate) fn list_programs(root: &Path) -> Vec<CorpusProgram> {
     programs
 }
 
-/// SHA-256 over every file under `dir` except build output, as `/`-separated relative path,
-/// length and bytes, in path order.
+/// SHA-256 over the git-tracked files under `dir`, as `/`-separated relative path, length and
+/// bytes, in path order; ignored and untracked files, build output included, do not count.
 fn source_hash(dir: &Path) -> String {
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    collect_files(dir, "", &mut files);
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let listing = git_output(dir, &["ls-files", "-z", "--", "."])
+        .unwrap_or_else(|| panic!("{} is not inside a git checkout", dir.display()));
+    let mut files: Vec<&str> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
+    assert!(
+        !files.is_empty(),
+        "no tracked files under {}",
+        dir.display()
+    );
+    files.sort_unstable();
     let mut hasher = Sha256::new();
-    for (path, bytes) in &files {
+    for path in files {
+        let bytes = std::fs::read(dir.join(path))
+            .unwrap_or_else(|e| panic!("cannot read {path} under {}: {e}", dir.display()));
         hasher.update(path.as_bytes());
         hasher.update(b"\0");
         hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
+        hasher.update(&bytes);
     }
     hex(&hasher.finalize())
-}
-
-fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries {
-        let path = entry.expect("source entry").path();
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let relative = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        if path.is_dir() {
-            if name != "target" {
-                collect_files(&path, &relative, out);
-            }
-        } else {
-            out.push((relative, std::fs::read(&path).expect("read source file")));
-        }
-    }
 }
 
 /// SHA-256 over every program's name and source hash, in name order.
@@ -152,11 +142,11 @@ fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-/// `rustc --version` resolved from the referee's directory, so its `rust-toolchain.toml` applies.
+/// `rustc --version` resolved from this crate's directory, so its `rust-toolchain.toml` applies.
 fn toolchain_version() -> String {
     Command::new("rustc")
         .arg("--version")
-        .current_dir(referee_dir())
+        .current_dir(crate_dir())
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -165,16 +155,16 @@ fn toolchain_version() -> String {
 }
 
 pub(crate) fn provenance(corpus: &Path, programs: &[CorpusProgram]) -> DumpProvenance {
-    let referee = referee_dir();
+    let root = crate_dir();
     DumpProvenance {
         format_version: DUMP_FORMAT_VERSION,
         projection_version: PROJECTION_VERSION,
         field: field_tag().to_string(),
         field_modulus: FieldElement::modulus().to_string(),
         noir_rev: noirc_driver::GIT_COMMIT.to_string(),
-        interpreter_rev: git_output(&referee, &["rev-parse", "HEAD"])
+        interpreter_rev: git_output(&root, &["rev-parse", "HEAD"])
             .unwrap_or_else(|| "unknown".to_string()),
-        interpreter_dirty: git_output(&referee, &["status", "--porcelain"])
+        interpreter_dirty: git_output(&root, &["status", "--porcelain"])
             .map(|status| !status.is_empty())
             .unwrap_or(true),
         corpus_dir: corpus.display().to_string(),
@@ -191,7 +181,7 @@ pub(crate) fn provenance(corpus: &Path, programs: &[CorpusProgram]) -> DumpProve
 
 /// The `rev` of every `worldfnd/noir` dependency in `Cargo.toml`, in file order.
 fn pinned_revs() -> Vec<String> {
-    let manifest = std::fs::read_to_string(referee_dir().join("Cargo.toml")).expect("Cargo.toml");
+    let manifest = std::fs::read_to_string(crate_dir().join("Cargo.toml")).expect("Cargo.toml");
     manifest
         .lines()
         .filter(|line| line.contains("github.com/worldfnd/noir"))
@@ -218,7 +208,8 @@ fn pin_disagreement(revs: &[String], stamp: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Check the corpus and its shared path dependencies at the stamped revision.
+/// Refuse `checkout` unless it is at the stamped revision with a clean corpus and path
+/// dependencies.
 pub(crate) fn check_checkout_matches_stamp(checkout: &Path) -> Result<(), String> {
     let head = git_output(checkout, &["rev-parse", "HEAD"]);
     let status = git_output(
@@ -273,19 +264,13 @@ pub(crate) fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// The first non-empty line of a panic payload. Takes the payload, not the `Box`: `&Box<dyn Any>`
-/// also unsizes to `&dyn Any` and never downcasts to the message.
+/// The text of a panic payload. Takes the payload, not the `Box`: `&Box<dyn Any>` also unsizes
+/// to `&dyn Any` and never downcasts to the message.
 pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
-        .and_then(|m| {
-            m.lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_string)
-        })
         .unwrap_or_else(|| "panic (payload is not a string)".to_string())
 }
 
@@ -298,8 +283,13 @@ fn run_step<T>(
         Ok(Err((error, detail))) => Err(StepOutcome::failed(error, detail)),
         Err(payload) => {
             let message = panic_message(payload.as_ref());
+            let first_line = message
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("panic");
             Err(StepOutcome::failed(
-                ComparableError::new(FailureKind::Panic, normalize_text(&message)),
+                ComparableError::new(FailureKind::Panic, normalize_text(first_line)),
                 message,
             ))
         }
@@ -325,7 +315,7 @@ fn path_roots(program_dir: &Path) -> Vec<(PathBuf, &'static str)> {
     let mut roots = vec![
         (program_dir.to_path_buf(), "<pkg>"),
         (noir_checkout(), "<noir>"),
-        (referee_dir(), "<referee>"),
+        (crate_dir(), "<crate>"),
     ];
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         roots.push((PathBuf::from(home).join("nargo"), "<nargo>"));
@@ -333,28 +323,42 @@ fn path_roots(program_dir: &Path) -> Vec<(PathBuf, &'static str)> {
     roots
 }
 
-/// Replace every root, and its canonical form, with its stand-in.
+/// Replace every root, in its given, lexically normalized and canonical forms, with its stand-in.
 fn normalize_paths(text: &str, roots: &[(PathBuf, &str)]) -> String {
     let mut text = text.to_string();
     for (root, stand_in) in roots {
-        let mut forms = vec![root.clone()];
-        if let Ok(canonical) = std::fs::canonicalize(root) {
-            if canonical != *root {
-                forms.push(canonical);
-            }
-        }
+        let mut forms = vec![root.clone(), root.normalize()];
+        forms.extend(std::fs::canonicalize(root));
+        forms.sort();
+        forms.dedup();
         for form in forms {
             let form = form.to_string_lossy();
             let form = form.trim_end_matches('/');
-            if form.is_empty() {
-                continue;
+            if !form.is_empty() {
+                text = replace_root(&text, form, stand_in);
             }
-            text = text
-                .replace(&format!("{form}/"), &format!("{stand_in}/"))
-                .replace(form, stand_in);
         }
     }
     text
+}
+
+/// Replace `root` where a separator, a delimiter or the end of the text follows it, never where it
+/// is the prefix of a longer name.
+fn replace_root(text: &str, root: &str, stand_in: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(root) {
+        let end = start + root.len();
+        let boundary = rest[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.')));
+        out.push_str(&rest[..start]);
+        out.push_str(if boundary { stand_in } else { root });
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn normalize_step(step: StepOutcome, roots: &[(PathBuf, &str)]) -> StepOutcome {
@@ -373,7 +377,7 @@ pub(crate) fn run_record(program: &CorpusProgram) -> RunRecord {
         return RunRecord {
             source_hash: program.source_hash.clone(),
             load: StepOutcome::not_run(
-                "workspace manifest: the referee runs single-package programs",
+                "workspace manifest: the interpreter runs single-package programs",
             ),
             compile: StepOutcome::not_run("not loaded"),
             interpret: StepOutcome::not_run("not compiled"),
@@ -469,7 +473,8 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
 }
 
 /// Check the return against the `return` recorded in `Prover.toml`: exactly under bn254, with
-/// `Field` values ignored under goldilocks because the corpus records bn254's.
+/// `Field` values ignored under goldilocks because the corpus records bn254's. A recorded return
+/// the field cannot decode leaves the check not run.
 fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) -> StepOutcome {
     let Some(src) = prover_src else {
         return StepOutcome::not_run("no Prover.toml");
@@ -479,6 +484,11 @@ fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) 
             .map_err(|e| interpret_failure(&e))
     });
     match recorded {
+        Err(StepOutcome::Failed { error, .. })
+            if matches!(error.kind, FailureKind::Unsupported { .. }) =>
+        {
+            StepOutcome::not_run(format!("recorded return: {}", error.payload))
+        }
         Err(step) => step,
         Ok(None) => StepOutcome::not_run("no recorded return"),
         Ok(Some(expected)) => compare_with_recorded(actual, &expected),
@@ -491,7 +501,7 @@ fn compare_with_recorded(actual: &Value, expected: &Value) -> StepOutcome {
     if let Err(reason) = values_equivalent(&actual, &expected) {
         return StepOutcome::failed(
             ComparableError::new(FailureKind::OracleMismatch, normalize_text(&reason)),
-            format!("interpreter returned {}", actual.render()),
+            format!("interpreter returned {actual}"),
         );
     }
     if cfg!(feature = "goldilocks") || actual == expected {
@@ -502,11 +512,7 @@ fn compare_with_recorded(actual: &Value, expected: &Value) -> StepOutcome {
                 FailureKind::OracleMismatch,
                 "field value differs from the recorded return",
             ),
-            format!(
-                "interpreter returned {}, recorded {}",
-                actual.render(),
-                expected.render()
-            ),
+            format!("interpreter returned {actual}, recorded {expected}"),
         )
     }
 }
@@ -524,23 +530,31 @@ mod tests {
     }
 
     #[test]
-    fn source_hash_covers_every_file_but_build_output() {
-        let a = tempfile::tempdir().unwrap();
-        write(a.path(), "src/main.nr", "fn main() {}");
-        write(a.path(), "Nargo.toml", "[package]");
-        write(a.path(), "crate1/src/lib.nr", "");
-        let b = tempfile::tempdir().unwrap();
-        write(b.path(), "crate1/src/lib.nr", "");
-        write(b.path(), "Nargo.toml", "[package]");
-        write(b.path(), "src/main.nr", "fn main() {}");
-        write(b.path(), "target/out.json", "{}");
-        assert_eq!(source_hash(a.path()), source_hash(b.path()));
+    fn source_hash_covers_tracked_files_only() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        let dir = repo.path().join("p");
+        write(&dir, "Nargo.toml", "[package]");
+        write(&dir, "src/main.nr", "fn main() {}");
+        write(repo.path(), ".gitignore", "ignored\n");
+        git(&["add", "-A"]);
+        let tracked = source_hash(&dir);
 
-        write(b.path(), "crate1/src/lib.nr", "fn f() {}");
-        assert_ne!(source_hash(a.path()), source_hash(b.path()));
-        write(a.path(), "crate1/src/lib.nr", "fn f() {}");
-        write(a.path(), "Prover.toml", "x = 2");
-        assert_ne!(source_hash(a.path()), source_hash(b.path()));
+        write(&dir, "ignored", "x");
+        write(&dir, "target/out.json", "{}");
+        write(&dir, "untracked.nr", "");
+        assert_eq!(source_hash(&dir), tracked);
+        write(&dir, "src/main.nr", "fn main() { let _x = 1; }");
+        assert_ne!(source_hash(&dir), tracked);
     }
 
     #[test]
@@ -589,13 +603,15 @@ mod tests {
 
     #[test]
     fn a_panicking_step_is_recorded_as_a_panic_of_that_step() {
-        let step = run_step(|| -> Result<(), (ComparableError, String)> { panic!("boom: {}", 42) })
-            .unwrap_err();
+        let step = run_step(|| -> Result<(), (ComparableError, String)> {
+            panic!("boom: {}\nleft: 1\nright: 2", 42)
+        })
+        .unwrap_err();
         match step {
             StepOutcome::Failed { error, detail } => {
                 assert_eq!(error.kind, FailureKind::Panic);
                 assert_eq!(error.payload, "boom: 42");
-                assert_eq!(detail, "boom: 42");
+                assert_eq!(detail, "boom: 42\nleft: 1\nright: 2");
             }
             other => panic!("expected a failed step, got {other:?}"),
         }
@@ -611,15 +627,17 @@ mod tests {
             (PathBuf::from("/home/me/noir"), "<noir>"),
         ];
         let text = "manifest: /home/me/noir/test_programs/execution_success/p/Nargo.toml needs \
-                    /home/me/noir/test_programs/test_libraries/dep (/home/me/noir)";
+                    /home/me/noir/test_programs/test_libraries/dep (/home/me/noir), not \
+                    /home/me/noir-other/x";
         assert_eq!(
             normalize_paths(text, &roots),
-            "manifest: <pkg>/Nargo.toml needs <noir>/test_programs/test_libraries/dep (<noir>)"
+            "manifest: <pkg>/Nargo.toml needs <noir>/test_programs/test_libraries/dep (<noir>), \
+             not /home/me/noir-other/x"
         );
         let program = fixture_program("interp_basic");
         let roots = path_roots(&program.dir);
         assert_eq!(roots[0].1, "<pkg>");
-        assert!(roots.iter().any(|(_, s)| *s == "<referee>"));
+        assert!(roots.iter().any(|(_, s)| *s == "<crate>"));
         let (nargo, _) = roots
             .iter()
             .find(|(_, s)| *s == "<nargo>")
@@ -683,6 +701,21 @@ mod tests {
         assert!(record.projection.passed(), "{:?}", record.projection);
         assert_eq!(record.projection_hash.as_deref().map(str::len), Some(64));
         assert_eq!(record.oracle, StepOutcome::not_run("no recorded return"));
+    }
+
+    #[test]
+    fn an_unrepresentable_recorded_return_leaves_the_return_check_not_run() {
+        let record = run_record(&fixture_program("interp_return_i64"));
+        assert!(record.interpret.passed(), "{:?}", record.interpret);
+        if cfg!(feature = "goldilocks") {
+            assert!(
+                matches!(&record.oracle, StepOutcome::NotRun { reason } if reason.starts_with("recorded return:")),
+                "{:?}",
+                record.oracle
+            );
+        } else {
+            assert!(record.oracle.passed(), "{:?}", record.oracle);
+        }
     }
 
     #[test]

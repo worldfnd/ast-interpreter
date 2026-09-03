@@ -2,7 +2,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use super::corpus::{compile_error_of, copy_dir, corpus_dir, list_programs, panic_message};
-use super::diff::{FailureKind, failure_kind_of};
+use super::diff::{FailureKind, comparable_error_of};
 use super::loader::NoirProject;
 use super::validation_frontend::compile_for_validation;
 use super::{IntValue, InterpretError, Value, inputs_from_prover_toml, interpret_with_inputs};
@@ -443,11 +443,11 @@ fn oracle_compare(program_dir: &Path) -> String {
             .map_err(|e| (compile_error_of(&e).kind, e.to_string()))?;
         let inputs = match &prover_src {
             Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
-                .map_err(|e| (failure_kind_of(&e), e.to_string()))?,
+                .map_err(|e| (comparable_error_of(&e).kind, e.to_string()))?,
             None => Vec::new(),
         };
         let value = interpret_with_inputs(&validated.program, inputs)
-            .map_err(|e| (failure_kind_of(&e), e.to_string()))?;
+            .map_err(|e| (comparable_error_of(&e).kind, e.to_string()))?;
         Ok::<_, (FailureKind, String)>((validated, value))
     }));
     let interp = match interp {
@@ -543,7 +543,7 @@ fn oracle_matches_interpreter_smoke() {
     }
 }
 
-/// The real correctness gate: run the whole `execution_success` corpus through the interpreter and
+/// Differential survey: run the whole `execution_success` corpus through the interpreter and
 /// Noir's executor and fail on any `MISMATCH` or `FALSE-REJECTION`. Tolerated `interp-unsupported`
 /// is counted, not failed. `#[ignore]`d and needs a big stack:
 ///   RUST_MIN_STACK=1073741824 cargo test --lib \

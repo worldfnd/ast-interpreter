@@ -6,12 +6,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
+use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
 
-use super::capability::{Capability, FieldDescriptor};
+use super::capability::Capability;
 use super::corpus::{
-    CorpusProgram, check_checkout_matches_stamp, corpus_dir, field_tag, fixtures_dir, hex,
-    list_programs, noir_checkout, provenance, referee_dir, run_record,
+    CorpusProgram, check_checkout_matches_stamp, corpus_dir, crate_dir, field_tag, fixtures_dir,
+    hex, list_programs, noir_checkout, provenance, run_record,
 };
 use super::diff::{
     CrossFieldDump, DiffOutcome, DumpProvenance, FailureKind, RunRecord, StepOutcome,
@@ -19,15 +20,15 @@ use super::diff::{
 };
 use super::projection::PROJECTION_VERSION;
 
-/// Rows for the referee's own fixtures carry this prefix.
+/// Rows for this crate's fixtures carry this prefix.
 const FIXTURE_PREFIX: &str = "fixtures/";
 
 fn status_path() -> PathBuf {
-    referee_dir().join("STATUS.md")
+    crate_dir().join("STATUS.md")
 }
 
 fn dump_dir() -> PathBuf {
-    referee_dir().join("target/status")
+    crate_dir().join("target/status")
 }
 
 fn dump_path(tag: &str) -> PathBuf {
@@ -35,7 +36,7 @@ fn dump_path(tag: &str) -> PathBuf {
 }
 
 /// Programs whose inputs or recorded return need a field property; a side whose field lacks it
-/// cannot run them.
+/// cannot run them. An entry whose row is not `predicted` is stale.
 const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
     ("bit_shifts_runtime", &[Capability::SignedFits(64)]),
     ("bit_shifts_u128", &[Capability::UnsignedFits(128)]),
@@ -59,8 +60,8 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
     ),
 ];
 
-/// Programs whose divergence is field-dependent by design. Each entry must keep diverging, and
-/// none covers a panic or an internal error.
+/// Programs whose divergence is field-dependent by design. An entry whose row is not
+/// `field-dependent` is stale, and none covers a panic or an internal error.
 const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
     (
         "modulus",
@@ -81,42 +82,6 @@ const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
         "casts a - (c as Field) to u64 with inputs that make it -1 mod p, whose low 64 bits are \
          field-specific",
     ),
-    (
-        "to_le_bytes",
-        "to_le_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "to_be_bytes",
-        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "to_bytes_consistent",
-        "to_be_bytes::<31> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "to_bytes_integration",
-        "to_*_bytes::<31/32> and to_le_bits::<254> plus modulus_* builtins are field-sized",
-    ),
-    (
-        "regression_7128",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "unrolling_regression_8333",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "brillig_cow_regression",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "vectors",
-        "to_be_bytes::<32> exceeds the Goldilocks 8-byte modulus size",
-    ),
-    (
-        "multi_scalar_mul",
-        "to_be_bits::<254> exceeds the Goldilocks 64-bit modulus size",
-    ),
 ];
 
 /// Fixtures that reach no field-gated code, so they must project identically under both fields.
@@ -130,24 +95,23 @@ const PROJECTION_INVARIANT_FIXTURES: &[&str] = &[
     "interp_match_int",
 ];
 
-fn allowlist_reason(name: &str) -> Option<&'static str> {
+fn is_allowlisted(name: &str) -> bool {
     KNOWN_FIELD_DEPENDENT
         .iter()
-        .find(|(entry, _)| *entry == name)
-        .map(|(_, reason)| *reason)
+        .any(|(entry, _)| *entry == name)
 }
 
-/// The first tagged capability of `name` that `field` lacks.
-fn predicted_gap(name: &str, field: &FieldDescriptor) -> Option<Capability> {
+/// Whether a capability tag of `name` fails to hold for `modulus`.
+fn predicted_gap(name: &str, modulus: &BigUint) -> bool {
     PROGRAM_CAPABILITIES
         .iter()
         .find(|(entry, _)| *entry == name)
-        .and_then(|(_, tags)| tags.iter().copied().find(|tag| !tag.holds(field)))
+        .is_some_and(|(_, tags)| tags.iter().any(|tag| !tag.holds(modulus)))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
-    /// A workspace manifest: the referee runs neither side.
+    /// A workspace manifest: the interpreter runs neither side.
     NotRun,
     /// Same value, or the same failure kind.
     Equal,
@@ -184,13 +148,6 @@ impl fmt::Display for Verdict {
     }
 }
 
-fn outcome_label(outcome: &DiffOutcome) -> String {
-    match outcome {
-        DiffOutcome::Returned(_) => "returned".to_string(),
-        DiffOutcome::Errored { error, .. } => error.kind.to_string(),
-    }
-}
-
 fn is_hard_failure(outcome: &DiffOutcome) -> bool {
     matches!(
         outcome,
@@ -199,130 +156,72 @@ fn is_hard_failure(outcome: &DiffOutcome) -> bool {
     )
 }
 
-/// The divergence class for a mismatched outcome pair.
-fn divergence_bucket(a: &DiffOutcome, b: &DiffOutcome) -> &'static str {
-    let has = |kind: FailureKind| {
-        matches!(a, DiffOutcome::Errored { error, .. } if error.kind == kind)
-            || matches!(b, DiffOutcome::Errored { error, .. } if error.kind == kind)
-    };
-    if has(FailureKind::Panic) {
-        return "panic";
-    }
-    if has(FailureKind::Internal) {
-        return "internal_error";
-    }
-    match (a, b) {
-        (DiffOutcome::Returned(_), DiffOutcome::Returned(_)) => "value_mismatch",
-        (DiffOutcome::Returned(_), DiffOutcome::Errored { .. })
-        | (DiffOutcome::Errored { .. }, DiffOutcome::Returned(_)) => "returned_vs_errored",
-        (DiffOutcome::Errored { .. }, DiffOutcome::Errored { .. }) => "kind_mismatch",
-    }
-}
-
 /// Panics and internal errors are never field-dependent by design.
 fn divergence_is_allowlistable(a: &DiffOutcome, b: &DiffOutcome) -> bool {
     !is_hard_failure(a) && !is_hard_failure(b)
 }
 
-struct Sides<'a> {
-    bn254: &'a FieldDescriptor,
-    goldilocks: &'a FieldDescriptor,
+struct Sides {
+    bn254: BigUint,
+    goldilocks: BigUint,
 }
 
 /// Classify one program's pair of outcomes (`a` under bn254, `b` under goldilocks).
-fn classify(name: &str, a: &DiffOutcome, b: &DiffOutcome, sides: &Sides<'_>) -> (Verdict, String) {
-    let allowlisted = allowlist_reason(name);
+fn classify(name: &str, a: &DiffOutcome, b: &DiffOutcome, sides: &Sides) -> Verdict {
+    let allowlisted = is_allowlisted(name);
     match outcomes_equivalent(a, b) {
-        Err(reason) => {
-            let input_gap = match (a, b) {
+        Err(_) => {
+            let rejected_input = match (a, b) {
                 (DiffOutcome::Returned(_), DiffOutcome::Errored { error, .. })
                     if error.kind == FailureKind::InputError =>
                 {
-                    Some(("goldilocks", sides.goldilocks))
+                    Some(&sides.goldilocks)
                 }
                 (DiffOutcome::Errored { error, .. }, DiffOutcome::Returned(_))
                     if error.kind == FailureKind::InputError =>
                 {
-                    Some(("bn254", sides.bn254))
+                    Some(&sides.bn254)
                 }
                 _ => None,
             };
-            if let Some((side, field)) = input_gap {
-                if let Some(tag) = predicted_gap(name, field) {
-                    return (
-                        Verdict::PredictedGap,
-                        format!("{side} lacks: {}", tag.describe()),
-                    );
-                }
-            }
-            match allowlisted {
-                Some(why) if divergence_is_allowlistable(a, b) => {
-                    (Verdict::FieldDependent, format!("{why}; {reason}"))
-                }
-                _ => (
-                    Verdict::Divergence,
-                    format!("{}: {reason}", divergence_bucket(a, b)),
-                ),
+            if rejected_input.is_some_and(|modulus| predicted_gap(name, modulus)) {
+                Verdict::PredictedGap
+            } else if allowlisted && divergence_is_allowlistable(a, b) {
+                Verdict::FieldDependent
+            } else {
+                Verdict::Divergence
             }
         }
         Ok(()) if outcome_is_tolerated(a, b) => {
             let (gap_a, gap_b) = (is_coverage_gap(a), is_coverage_gap(b));
             if gap_a && gap_b {
-                return (
-                    Verdict::CoverageGap,
-                    format!("{} / {}", outcome_label(a), outcome_label(b)),
-                );
+                return Verdict::CoverageGap;
             }
-            let (side, gap, other, field) = if gap_a {
-                ("bn254", a, b, sides.bn254)
+            let (gap, other, modulus) = if gap_a {
+                (a, b, &sides.bn254)
             } else {
-                ("goldilocks", b, a, sides.goldilocks)
+                (b, a, &sides.goldilocks)
             };
             let DiffOutcome::Errored { error, .. } = gap else {
                 unreachable!("a coverage gap is an errored outcome");
             };
             if error.kind == FailureKind::DependencyCompileGap {
-                let note = match allowlisted {
-                    Some(why) => format!("{side}: {}; allowlisted: {why}", error.payload),
-                    None => format!("{side}: {}", error.payload),
-                };
-                return (Verdict::DependencyGap, note);
-            }
-            if let Some(tag) = predicted_gap(name, field) {
-                return (
-                    Verdict::PredictedGap,
-                    format!("{side} lacks: {}", tag.describe()),
-                );
-            }
-            if !matches!(other, DiffOutcome::Returned(_)) {
-                return (
-                    Verdict::CoverageGap,
-                    format!(
-                        "{side}: {}; other side: {}",
-                        error.kind,
-                        outcome_label(other)
-                    ),
-                );
-            }
-            match allowlisted {
-                Some(why) => (
-                    Verdict::FieldDependent,
-                    format!("{side}: {}; {why}", error.kind),
-                ),
-                None => (
-                    Verdict::UnexpectedGap,
-                    format!("{side}: {} with no capability predicting it", error.kind),
-                ),
+                Verdict::DependencyGap
+            } else if predicted_gap(name, modulus) {
+                Verdict::PredictedGap
+            } else if !matches!(other, DiffOutcome::Returned(_)) {
+                Verdict::CoverageGap
+            } else if allowlisted {
+                Verdict::FieldDependent
+            } else {
+                Verdict::UnexpectedGap
             }
         }
         Ok(()) => match (a, b) {
-            (DiffOutcome::Returned(x), DiffOutcome::Returned(y)) if x == y => {
-                (Verdict::Equal, String::new())
+            (DiffOutcome::Returned(x), DiffOutcome::Returned(y)) if x != y => {
+                Verdict::EqualModuloField
             }
-            (DiffOutcome::Returned(_), DiffOutcome::Returned(_)) => {
-                (Verdict::EqualModuloField, String::new())
-            }
-            _ => (Verdict::Equal, format!("both: {}", outcome_label(a))),
+            _ => Verdict::Equal,
         },
     }
 }
@@ -355,6 +254,9 @@ fn step_glyphs(record: &RunRecord) -> [&'static str; 3] {
 }
 
 fn ast_glyph(a: &RunRecord, b: &RunRecord) -> &'static str {
+    if a.projection.failure().is_some() || b.projection.failure().is_some() {
+        return "❌";
+    }
     match (&a.projection_hash, &b.projection_hash) {
         (Some(x), Some(y)) if x == y => "✅",
         (Some(_), Some(_)) => "❌",
@@ -368,6 +270,7 @@ fn fingerprint(a: &RunRecord, b: &RunRecord) -> String {
     let mut hasher = Sha256::new();
     for record in [a, b] {
         hasher.update(record.source_hash.as_bytes());
+        hasher.update(b"\n");
         for step in [
             &record.load,
             &record.compile,
@@ -375,11 +278,11 @@ fn fingerprint(a: &RunRecord, b: &RunRecord) -> String {
             &record.oracle,
             &record.projection,
         ] {
-            hasher.update(step.render().as_bytes());
+            hasher.update(step.to_string().as_bytes());
             hasher.update(b"\n");
         }
         if let Some(value) = &record.returned {
-            hasher.update(value.render().as_bytes());
+            hasher.update(value.to_string().as_bytes());
         }
         hasher.update(b"\n");
         hasher.update(
@@ -394,13 +297,13 @@ fn fingerprint(a: &RunRecord, b: &RunRecord) -> String {
     hex(&hasher.finalize())[..8].to_string()
 }
 
-fn row(name: &str, a: &RunRecord, b: &RunRecord, sides: &Sides<'_>) -> Row {
+fn row(name: &str, a: &RunRecord, b: &RunRecord, sides: &Sides) -> Row {
     let not_run = |record: &RunRecord| matches!(record.load, StepOutcome::NotRun { .. });
-    let (verdict, ast) = if not_run(a) || not_run(b) {
+    let (verdict, ast) = if not_run(a) && not_run(b) {
         (Verdict::NotRun, "➖")
     } else {
         (
-            classify(name, &a.outcome(), &b.outcome(), sides).0,
+            classify(name, &a.outcome(), &b.outcome(), sides),
             ast_glyph(a, b),
         )
     };
@@ -417,17 +320,22 @@ fn row(name: &str, a: &RunRecord, b: &RunRecord, sides: &Sides<'_>) -> Row {
 const HEADER: &str = "| Program | bn254 compile | bn254 run | bn254 return | goldilocks compile | goldilocks run | goldilocks return | Fields | AST | Record |\n\
      | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n";
 
-fn render_status(bn254: &DumpProvenance, goldilocks: &DumpProvenance, rows: &[Row]) -> String {
+fn render_status(provenance: &DumpProvenance, rows: &[Row]) -> String {
     let mut out = String::from(
         "# Status\n\n\
          Every program of Noir's `execution_success` corpus and this crate's fixtures, compiled \
          and interpreted under both fields at the pinned compiler revision. `compile`, `run` and \
          `return` are the frontend, the interpreter and the check against the `return` recorded in \
          `Prover.toml` (exact under bn254; `Field` values ignored under goldilocks, whose corpus \
-         records bn254 values). `Fields` is the cross-field verdict; `equal*` means only `Field` \
-         values differ. `AST` says whether both monomorphized programs project to the same hash. \
-         `Record` fingerprints the row's underlying records, so any change shows here even when \
-         the glyphs do not. Regenerate with `make status`; CI fails when a fresh run differs.\n\n",
+         records bn254 values): ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two sides: \
+         `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field \
+         property the program's inputs or recorded return need; `field-dependent`, allowlisted as \
+         field-dependent by design; `dependency`, one side reaches stdlib code that does not \
+         elaborate under its field; `both-sides`, neither side ran it; `unexpected`, a one-sided \
+         gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest. \
+         `AST` says whether both monomorphized programs project to the same hash. `Record` \
+         fingerprints the row's underlying records, so any change shows here even when the glyphs \
+         do not. Regenerate with `make status`; CI fails when a fresh run differs.\n\n",
     );
     let fixtures = rows
         .iter()
@@ -437,14 +345,13 @@ fn render_status(bn254: &DumpProvenance, goldilocks: &DumpProvenance, rows: &[Ro
         "| provenance | value |\n| --- | --- |\n\
          | noir_rev | {} |\n| corpus_hash | {} |\n| programs | {} corpus, {fixtures} fixtures |\n\
          | toolchain | {} |\n| format | dump {}, projection {} |\n\n",
-        bn254.noir_rev,
-        bn254.corpus_hash,
-        bn254.program_count,
-        bn254.toolchain,
-        bn254.format_version,
-        bn254.projection_version
+        provenance.noir_rev,
+        provenance.corpus_hash,
+        provenance.program_count,
+        provenance.toolchain,
+        provenance.format_version,
+        provenance.projection_version
     ));
-    debug_assert_eq!(bn254.format_version, goldilocks.format_version);
 
     out.push_str(HEADER);
     for row in rows {
@@ -498,6 +405,43 @@ fn render_status(bn254: &DumpProvenance, goldilocks: &DumpProvenance, rows: &[Ro
         out.push_str(&format!("| {verdict} | {count} |\n"));
     }
     out
+}
+
+/// Stale allowlist entries, stale capability tags and projection drift: the harness's own
+/// invariants, which fail the render where a divergence only makes a row.
+fn invariant_violations(rows: &[Row]) -> Vec<String> {
+    let verdict_of = |name: &str| {
+        rows.iter()
+            .find(|row| row.name == name)
+            .map(|row| row.verdict)
+    };
+    let mut violations = Vec::new();
+    for (name, _) in KNOWN_FIELD_DEPENDENT {
+        if verdict_of(name) != Some(Verdict::FieldDependent) {
+            violations.push(format!(
+                "{name}: not field-dependent; remove it from KNOWN_FIELD_DEPENDENT"
+            ));
+        }
+    }
+    for (name, _) in PROGRAM_CAPABILITIES {
+        if verdict_of(name) != Some(Verdict::PredictedGap) {
+            violations.push(format!(
+                "{name}: its gap is not the predicted one; remove it from PROGRAM_CAPABILITIES"
+            ));
+        }
+    }
+    for name in PROJECTION_INVARIANT_FIXTURES {
+        let name = format!("{FIXTURE_PREFIX}{name}");
+        match rows.iter().find(|row| row.name == name) {
+            Some(row) if row.ast == "✅" => {}
+            Some(row) => violations.push(format!(
+                "{name}: projects differently across fields ({})",
+                row.ast
+            )),
+            None => violations.push(format!("{name}: missing")),
+        }
+    }
+    violations
 }
 
 fn records_for(
@@ -601,7 +545,7 @@ fn render_status_file() {
     );
     assert_eq!(
         pa.interpreter_rev, pb.interpreter_rev,
-        "dumps built against different referee revisions"
+        "dumps built from different interpreter revisions"
     );
     assert_eq!(
         pa.toolchain, pb.toolchain,
@@ -609,13 +553,13 @@ fn render_status_file() {
     );
     assert_eq!(
         pa.corpus_hash, pb.corpus_hash,
-        "dumps photograph different corpora"
+        "dumps cover different corpora"
     );
     assert_eq!(pa.program_count, pb.program_count);
 
     let sides = Sides {
-        bn254: &FieldDescriptor::new(&pa.field, pa.field_modulus.parse().unwrap()),
-        goldilocks: &FieldDescriptor::new(&pb.field, pb.field_modulus.parse().unwrap()),
+        bn254: pa.field_modulus.parse().unwrap(),
+        goldilocks: pb.field_modulus.parse().unwrap(),
     };
     let bn: BTreeMap<String, RunRecord> = bn254.records.into_iter().collect();
     let gl: BTreeMap<String, RunRecord> = goldilocks.records.into_iter().collect();
@@ -644,7 +588,7 @@ fn render_status_file() {
     );
 
     let path = status_path();
-    std::fs::write(&path, render_status(pa, pb, &rows)).unwrap();
+    std::fs::write(&path, render_status(pa, &rows)).unwrap();
 
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for row in &rows {
@@ -656,22 +600,7 @@ fn render_status_file() {
         path.display()
     );
 
-    let stale: Vec<&str> = KNOWN_FIELD_DEPENDENT
-        .iter()
-        .map(|(name, _)| *name)
-        .filter(|name| {
-            let row = rows.iter().find(|row| row.name == *name);
-            row.is_none_or(|row| matches!(row.verdict, Verdict::Equal | Verdict::EqualModuloField))
-        })
-        .collect();
-    let projection_drift: Vec<String> = PROJECTION_INVARIANT_FIXTURES
-        .iter()
-        .map(|name| format!("{FIXTURE_PREFIX}{name}"))
-        .filter_map(|name| rows.iter().find(|row| row.name == name))
-        .filter(|row| row.ast != "✅")
-        .map(|row| format!("{} ({})", row.name, row.ast))
-        .collect();
-
+    let violations = invariant_violations(&rows);
     assert!(
         missing.is_empty(),
         "programs missing from one dump: {}",
@@ -682,14 +611,9 @@ fn render_status_file() {
         "no program returned a value under both fields"
     );
     assert!(
-        stale.is_empty(),
-        "allowlisted program(s) absent or no longer diverging; remove from KNOWN_FIELD_DEPENDENT: {}",
-        stale.join(", ")
-    );
-    assert!(
-        projection_drift.is_empty(),
-        "field-independent fixtures project differently across fields: {}",
-        projection_drift.join(", ")
+        violations.is_empty(),
+        "harness invariants violated:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -698,17 +622,13 @@ mod tests {
     use super::*;
     use crate::diff::{ComparableError, DiffValue};
 
-    fn bn254() -> FieldDescriptor {
-        FieldDescriptor::new(
-            "bn254",
-            "21888242871839275222246405745257275088548364400416034343698204186575808495617"
+    fn sides() -> Sides {
+        Sides {
+            bn254: "21888242871839275222246405745257275088548364400416034343698204186575808495617"
                 .parse()
                 .unwrap(),
-        )
-    }
-
-    fn goldilocks() -> FieldDescriptor {
-        FieldDescriptor::new("goldilocks", "18446744069414584321".parse().unwrap())
+            goldilocks: "18446744069414584321".parse().unwrap(),
+        }
     }
 
     fn returned(value: &str) -> DiffOutcome {
@@ -735,118 +655,95 @@ mod tests {
         )
     }
 
-    fn verdict(name: &str, a: &DiffOutcome, b: &DiffOutcome) -> (Verdict, String) {
-        let (bn, gl) = (bn254(), goldilocks());
-        classify(
-            name,
-            a,
-            b,
-            &Sides {
-                bn254: &bn,
-                goldilocks: &gl,
-            },
-        )
+    fn verdict(name: &str, a: &DiffOutcome, b: &DiffOutcome) -> Verdict {
+        classify(name, a, b, &sides())
     }
 
     #[test]
     fn equal_values_and_field_only_differences_are_told_apart() {
-        assert_eq!(
-            verdict("p", &returned("1"), &returned("1")).0,
-            Verdict::Equal
-        );
+        assert_eq!(verdict("p", &returned("1"), &returned("1")), Verdict::Equal);
         let (a, b) = (
             DiffOutcome::Returned(DiffValue::Field("1".into())),
             DiffOutcome::Returned(DiffValue::Field("2".into())),
         );
-        assert_eq!(verdict("p", &a, &b).0, Verdict::EqualModuloField);
+        assert_eq!(verdict("p", &a, &b), Verdict::EqualModuloField);
         assert_eq!(
-            verdict("p", &returned("1"), &returned("2")).0,
+            verdict("p", &returned("1"), &returned("2")),
             Verdict::Divergence
         );
     }
 
     #[test]
     fn a_one_sided_gap_needs_a_prediction() {
-        let (v, note) = verdict("p", &returned("1"), &unsupported("intrinsic"));
-        assert_eq!(v, Verdict::UnexpectedGap);
-        assert!(note.contains("goldilocks"), "{note}");
-
-        let (v, note) = verdict(
-            "bit_shifts_runtime",
-            &returned("1"),
-            &unsupported("signed 64-bit ABI input is not representable in this field"),
-        );
-        assert_eq!(v, Verdict::PredictedGap);
-        assert!(note.contains("i64 encodes injectively"), "{note}");
         assert_eq!(
-            verdict("bit_shifts_runtime", &unsupported("x"), &returned("1")).0,
+            verdict("p", &returned("1"), &unsupported("intrinsic")),
+            Verdict::UnexpectedGap
+        );
+        let gap = unsupported("signed 64-bit ABI input is not representable in this field");
+        assert_eq!(
+            verdict("bit_shifts_runtime", &returned("1"), &gap),
+            Verdict::PredictedGap
+        );
+        assert_eq!(
+            verdict("bit_shifts_runtime", &unsupported("x"), &returned("1")),
             Verdict::UnexpectedGap
         );
     }
 
     #[test]
     fn gaps_beside_errors_dependency_gaps_and_two_sided_gaps_are_named() {
-        let (v, note) = verdict(
-            "p",
-            &unsupported("intrinsic"),
-            &errored(FailureKind::CompileError, "no impl"),
+        assert_eq!(
+            verdict(
+                "p",
+                &unsupported("intrinsic"),
+                &errored(FailureKind::CompileError, "no impl")
+            ),
+            Verdict::CoverageGap
         );
-        assert_eq!(v, Verdict::CoverageGap);
-        assert!(note.contains("CompileError"), "{note}");
-        let dep = errored(FailureKind::DependencyCompileGap, "std/field/mod.nr");
-        let (v, note) = verdict("p", &returned("1"), &dep);
-        assert_eq!(v, Verdict::DependencyGap);
-        assert!(note.contains("std/field/mod.nr"), "{note}");
-        let (v, _) = verdict("p", &unsupported("intrinsic"), &unsupported("oracle call"));
-        assert_eq!(v, Verdict::CoverageGap);
+        assert_eq!(
+            verdict(
+                "p",
+                &returned("1"),
+                &errored(FailureKind::DependencyCompileGap, "std/field/mod.nr")
+            ),
+            Verdict::DependencyGap
+        );
+        assert_eq!(
+            verdict("p", &unsupported("intrinsic"), &unsupported("oracle call")),
+            Verdict::CoverageGap
+        );
     }
 
     #[test]
     fn rejected_inputs_are_a_predicted_gap_only_under_a_tag() {
         let rejected = errored(FailureKind::InputError, "value too large");
-        let (v, note) = verdict("bit_shifts_u128", &returned("1"), &rejected);
-        assert_eq!(v, Verdict::PredictedGap);
-        assert!(note.contains("u128 fits"), "{note}");
         assert_eq!(
-            verdict("p", &returned("1"), &rejected).0,
+            verdict("bit_shifts_u128", &returned("1"), &rejected),
+            Verdict::PredictedGap
+        );
+        assert_eq!(verdict("p", &returned("1"), &rejected), Verdict::Divergence);
+        assert_eq!(
+            verdict("bit_shifts_u128", &rejected, &returned("1")),
             Verdict::Divergence
         );
-        assert_eq!(
-            verdict("bit_shifts_u128", &rejected, &returned("1")).0,
-            Verdict::Divergence
-        );
-    }
-
-    #[test]
-    fn a_workspace_manifest_is_a_not_run_row() {
-        let (bn, gl) = (bn254(), goldilocks());
-        let sides = Sides {
-            bn254: &bn,
-            goldilocks: &gl,
-        };
-        let mut skipped = record(None, "1");
-        skipped.load = StepOutcome::not_run("workspace manifest");
-        skipped.projection_hash = None;
-        let row = row("ws", &skipped, &skipped, &sides);
-        assert_eq!(row.verdict, Verdict::NotRun);
-        assert_eq!(row.bn254, ["➖", "✅", "➖"]);
     }
 
     #[test]
     fn the_allowlist_covers_divergences_but_never_crashes() {
         let assertion = errored(FailureKind::AssertionFailed, "x");
         assert_eq!(
-            verdict("to_be_bytes", &returned("1"), &assertion).0,
+            verdict("modulus", &returned("1"), &assertion),
             Verdict::FieldDependent
         );
         assert_eq!(
-            verdict("other", &returned("1"), &assertion).0,
+            verdict("other", &returned("1"), &assertion),
             Verdict::Divergence
         );
         let panic = errored(FailureKind::Panic, "boom");
-        let (v, note) = verdict("to_be_bytes", &returned("1"), &panic);
-        assert_eq!(v, Verdict::Divergence);
-        assert!(note.starts_with("panic"), "{note}");
+        assert_eq!(
+            verdict("modulus", &returned("1"), &panic),
+            Verdict::Divergence
+        );
         assert!(!divergence_is_allowlistable(&returned("1"), &panic));
         assert!(!divergence_is_allowlistable(
             &errored(FailureKind::Internal, ""),
@@ -867,12 +764,12 @@ mod tests {
         }
     }
 
-    fn provenance_for(field: &str, modulus: &str) -> DumpProvenance {
+    fn provenance() -> DumpProvenance {
         DumpProvenance {
             format_version: 3,
             projection_version: PROJECTION_VERSION,
-            field: field.to_string(),
-            field_modulus: modulus.to_string(),
+            field: "bn254".to_string(),
+            field_modulus: "7".to_string(),
             noir_rev: "deadbeef".to_string(),
             interpreter_rev: "cafe".to_string(),
             interpreter_dirty: false,
@@ -885,21 +782,27 @@ mod tests {
         }
     }
 
-    fn render(rows: &[Row]) -> String {
-        render_status(
-            &provenance_for("bn254", "7"),
-            &provenance_for("goldilocks", "5"),
-            rows,
-        )
+    #[test]
+    fn a_workspace_manifest_is_a_not_run_row_and_a_load_failure_a_compile_failure() {
+        let mut skipped = record(None, "1");
+        skipped.load = StepOutcome::not_run("workspace manifest");
+        skipped.interpret = StepOutcome::not_run("not compiled");
+        skipped.projection_hash = None;
+        let row = row("ws", &skipped, &skipped, &sides());
+        assert_eq!(row.verdict, Verdict::NotRun);
+        assert_eq!(row.bn254, ["➖", "➖", "➖"]);
+
+        let mut unloadable = record(None, "1");
+        unloadable.load = StepOutcome::failed(
+            ComparableError::new(FailureKind::ProjectLoad, "no manifest"),
+            "",
+        );
+        assert_eq!(step_glyphs(&unloadable)[0], "❌");
     }
 
     #[test]
     fn rows_carry_glyphs_ast_agreement_and_a_detail_free_fingerprint() {
-        let (bn, gl) = (bn254(), goldilocks());
-        let sides = Sides {
-            bn254: &bn,
-            goldilocks: &gl,
-        };
+        let sides = sides();
         let ok = record(Some(DiffValue::Unit), "1");
         let same = row("p", &ok, &ok, &sides);
         assert_eq!((same.verdict, same.ast), (Verdict::Equal, "✅"));
@@ -921,7 +824,7 @@ mod tests {
         failed.projection_hash = None;
         let broken = row("q", &ok, &failed, &sides);
         assert_eq!(broken.goldilocks, ["✅", "❌", "➖"]);
-        assert_eq!((broken.verdict, broken.ast), (Verdict::Divergence, "➖"));
+        assert_eq!((broken.verdict, broken.ast), (Verdict::Divergence, "❌"));
         let mut other_detail = failed.clone();
         other_detail.interpret = StepOutcome::failed(
             ComparableError::new(FailureKind::Panic, "stable cause"),
@@ -939,12 +842,36 @@ mod tests {
     }
 
     #[test]
+    fn invariants_flag_inert_entries_and_missing_fixtures() {
+        let sides = sides();
+        let ok = record(Some(DiffValue::Unit), "1");
+        let mut rejected = record(None, "1");
+        rejected.interpret = StepOutcome::failed(
+            ComparableError::new(FailureKind::InputError, "too large"),
+            "",
+        );
+        let rows = [
+            row("modulus", &ok, &ok, &sides),
+            row("bit_shifts_u128", &ok, &rejected, &sides),
+        ];
+        let violations = invariant_violations(&rows);
+        assert!(
+            violations.iter().any(|v| v.starts_with("modulus:")),
+            "{violations:?}"
+        );
+        assert!(
+            !violations.iter().any(|v| v.starts_with("bit_shifts_u128:")),
+            "{violations:?}"
+        );
+        assert!(
+            violations.contains(&"fixtures/interp_match_int: missing".to_string()),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
     fn status_rendering_is_deterministic_and_omits_triage_fields() {
-        let (bn, gl) = (bn254(), goldilocks());
-        let sides = Sides {
-            bn254: &bn,
-            goldilocks: &gl,
-        };
+        let sides = sides();
         let ok = record(Some(DiffValue::Str("with | pipe".into())), "1");
         let mut failed = ok.clone();
         failed.oracle = StepOutcome::failed(
@@ -955,8 +882,8 @@ mod tests {
             row("a_prog", &ok, &failed, &sides),
             row(&format!("{FIXTURE_PREFIX}fix"), &ok, &ok, &sides),
         ];
-        let text = render(&rows);
-        assert_eq!(text, render(&rows));
+        let text = render_status(&provenance(), &rows);
+        assert_eq!(text, render_status(&provenance(), &rows));
         assert!(
             text.contains("| a_prog | ✅ | ✅ | ➖ | ✅ | ✅ | ❌ | ✅ equal | ✅ | "),
             "{text}"
