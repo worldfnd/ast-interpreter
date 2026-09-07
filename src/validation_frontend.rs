@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fm::{FileId, FileManager};
 use nargo::package::Package;
 use noirc_abi::Abi;
+use noirc_errors::CustomDiagnostic;
 use noirc_frontend::debug::DebugInstrumenter;
 use noirc_frontend::graph::CrateId;
 use noirc_frontend::hir::{Context, ParsedFiles};
@@ -25,32 +26,58 @@ pub(crate) struct Validated {
     pub abi: Abi,
 }
 
-/// A validation frontend failure with a human-readable diagnostic.
+/// `summary` is the diagnostic text without spans or file ids; `detail` is the full debug
+/// rendering.
 #[derive(Debug)]
 pub(crate) enum ValidationError {
-    Compile(String),
-    DependencyCompileGap(String),
+    Compile { summary: String, detail: String },
+    DependencyCompileGap { summary: String, detail: String },
 }
 
 impl ValidationError {
-    fn message(&self) -> &str {
+    fn compile(summary: impl Into<String>, detail: impl Into<String>) -> Self {
+        ValidationError::Compile {
+            summary: summary.into(),
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn summary(&self) -> &str {
         match self {
-            ValidationError::Compile(m) | ValidationError::DependencyCompileGap(m) => m,
+            ValidationError::Compile { summary, .. }
+            | ValidationError::DependencyCompileGap { summary, .. } => summary,
+        }
+    }
+
+    pub(crate) fn detail(&self) -> &str {
+        match self {
+            ValidationError::Compile { detail, .. }
+            | ValidationError::DependencyCompileGap { detail, .. } => detail,
         }
     }
 
     pub(crate) fn is_dependency_compile_gap(&self) -> bool {
-        matches!(self, ValidationError::DependencyCompileGap(_))
+        matches!(self, ValidationError::DependencyCompileGap { .. })
     }
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message())
+        f.write_str(self.summary())
     }
 }
 
 impl std::error::Error for ValidationError {}
+
+/// The messages of the error and bug diagnostics in `diagnostics`, joined into one line.
+fn diagnostic_summary(diagnostics: &[CustomDiagnostic]) -> String {
+    let messages: Vec<&str> = diagnostics
+        .iter()
+        .filter(|d| d.is_error() || d.is_bug())
+        .map(|d| d.message.as_str())
+        .collect();
+    messages.join(" | ")
+}
 
 /// Run the Noir frontend through monomorphization and return the mono-AST + ABI.
 ///
@@ -75,7 +102,8 @@ pub(crate) fn compile_for_validation(
     let main = context
         .get_main_function(context.root_crate_id())
         .ok_or_else(|| {
-            ValidationError::Compile("expected a `main` function to validate".to_string())
+            let message = "expected a `main` function to validate";
+            ValidationError::compile(message, message)
         })?;
     let debug_type_tracker =
         DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
@@ -89,10 +117,10 @@ pub(crate) fn compile_for_validation(
     );
     monomorphizer
         .compile_main(main)
-        .map_err(|e| ValidationError::Compile(format!("{e:?}")))?;
+        .map_err(monomorphization_error)?;
     monomorphizer
         .process_queue()
-        .map_err(|e| ValidationError::Compile(format!("{e:?}")))?;
+        .map_err(monomorphization_error)?;
     reject_code_from_tolerated_files(&context.file_manager, &monomorphizer, &tolerated_files)?;
     let program = monomorphizer.into_program();
 
@@ -125,17 +153,27 @@ fn tolerated_dependency_error_files(
                 .filter(|d| d.is_error() || d.is_bug())
                 .partition(|d| package_files.contains(&d.file));
             if !package_errors.is_empty() {
-                return Err(ValidationError::Compile(format!(
-                    "Noir compiler error: {package_errors:?}"
-                )));
+                return Err(ValidationError::compile(
+                    diagnostic_summary(&package_errors),
+                    format!("Noir compiler error: {package_errors:?}"),
+                ));
             }
             Ok(tolerated.into_iter().map(|d| d.file).collect())
         }
         #[cfg(not(feature = "goldilocks"))]
-        Err(diagnostics) => Err(ValidationError::Compile(format!(
-            "Noir compiler error: {diagnostics:?}"
-        ))),
+        Err(diagnostics) => Err(ValidationError::compile(
+            diagnostic_summary(&diagnostics),
+            format!("Noir compiler error: {diagnostics:?}"),
+        )),
     }
+}
+
+fn monomorphization_error(
+    error: noirc_frontend::monomorphization::errors::MonomorphizationError,
+) -> ValidationError {
+    let detail = format!("{error:?}");
+    let summary = CustomDiagnostic::from(error).message;
+    ValidationError::compile(summary, detail)
 }
 
 /// Reject monomorphized code from dependencies whose diagnostics were tolerated. Constants folded
@@ -145,7 +183,7 @@ fn reject_code_from_tolerated_files(
     monomorphizer: &Monomorphizer,
     tolerated: &BTreeSet<FileId>,
 ) -> Result<(), ValidationError> {
-    let poisoned: Vec<String> = monomorphizer
+    let mut poisoned: Vec<String> = monomorphizer
         .monomorphized_source_files()
         .intersection(tolerated)
         .map(|id| {
@@ -154,12 +192,17 @@ fn reject_code_from_tolerated_files(
                 .map_or_else(|| format!("{id:?}"), |p| p.display().to_string())
         })
         .collect();
+    poisoned.sort();
     if poisoned.is_empty() {
         return Ok(());
     }
-    Err(ValidationError::DependencyCompileGap(format!(
+    let message = format!(
         "program reaches dependency code from files that failed elaboration under the chosen \
          field: {}",
         poisoned.join(", ")
-    )))
+    );
+    Err(ValidationError::DependencyCompileGap {
+        summary: message.clone(),
+        detail: message,
+    })
 }

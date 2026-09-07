@@ -14,12 +14,19 @@ mod error;
 mod eval;
 mod input;
 mod intrinsics;
+mod projection;
 mod value;
 
+#[cfg(test)]
+mod capability;
+#[cfg(test)]
+mod corpus;
 #[cfg(test)]
 mod loader;
 #[cfg(test)]
 mod noir_oracle;
+#[cfg(test)]
+mod status;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -28,11 +35,13 @@ mod validation_frontend;
 mod value_proptest;
 
 pub use diff::{
-    CrossFieldDump, DUMP_FORMAT_VERSION, DiffOutcome, DiffValue, DumpProvenance, FailureKind,
-    failure_kind_of, outcome_is_tolerated, outcomes_equivalent, values_equivalent,
+    ComparableError, CrossFieldDump, DUMP_FORMAT_VERSION, DiffOutcome, DiffValue, DumpProvenance,
+    FailureKind, RunRecord, StepOutcome, comparable_error_of, outcome_is_tolerated,
+    outcomes_equivalent, values_equivalent,
 };
 pub use error::InterpretError;
 pub use input::{expected_return_from_prover_toml, inputs_from_prover_toml};
+pub use projection::{PROJECTION_VERSION, canonical_text, projection_hash};
 pub use value::{IntValue, Value};
 
 use std::cell::RefCell;

@@ -91,7 +91,8 @@ impl IntValue {
     pub fn checked(signed: bool, bits: u8, raw: BigInt, op: &str) -> Result<Self, InterpretError> {
         let (min, max) = Self::range(signed, bits);
         if raw < min || raw > max {
-            return Err(InterpretError::Overflow(op.to_string()));
+            let sign = if signed { 'i' } else { 'u' };
+            return Err(InterpretError::Overflow(format!("{op} on {sign}{bits}")));
         }
         Ok(IntValue {
             signed,
