@@ -13,19 +13,24 @@ use crate::error::InterpretError;
 use crate::eval::eval_int_binary;
 use crate::value::{IntValue, Value, field_to_bigint, wrap};
 
-/// The integer widths this crate supports (bit sizes of Noir's `u*`/`i*` types).
+/// Noir widths plus the planned arbitrary-width carrier cases.
 fn width() -> impl Strategy<Value = u32> {
-    prop_oneof![Just(8u32), Just(16u32), Just(32u32), Just(64u32), Just(128u32),]
+    proptest::sample::select(vec![8, 16, 32, 34, 64, 66, 128, 256, 65536])
 }
 
-/// The smallest supported width strictly greater than `bits` (saturating at the 128-bit max). Used
-/// so the cast round-trip exercises genuine widening instead of collapsing to a same-width no-op.
+/// The smallest width in [`width`] strictly greater than `bits` (saturating at the 65536-bit max).
+/// Used so the cast round-trip exercises genuine widening instead of collapsing to a same-width
+/// no-op.
 fn wider_than(bits: u32) -> u32 {
     match bits {
         8 => 16,
         16 => 32,
-        32 => 64,
-        _ => 128,
+        32 => 34,
+        34 => 64,
+        64 => 66,
+        66 => 128,
+        128 => 256,
+        _ => 65536,
     }
 }
 
@@ -107,7 +112,8 @@ proptest! {
         prop_assert_eq!(&back.value, &v.value);
         prop_assert_eq!(flip.unsigned_repr(), v.unsigned_repr());
 
-        // (b) widen to the next larger width (genuine widening for bits < 128), then narrow back.
+        // (b) widen to the next larger width (genuine widening below the 65536-bit max), then
+        // narrow back.
         let bits2 = wider_than(bits);
         let wide = IntValue::canonical(signed, bits2, v.value.clone());
         prop_assert_eq!(&wide.value, &v.value);
