@@ -13,30 +13,35 @@ use crate::error::InterpretError;
 use crate::eval::eval_int_binary;
 use crate::value::{IntValue, Value, field_to_bigint, wrap};
 
-/// The integer widths this crate supports (bit sizes of Noir's `u*`/`i*` types).
-fn width() -> impl Strategy<Value = u8> {
-    prop_oneof![Just(8u8), Just(16u8), Just(32u8), Just(64u8), Just(128u8),]
+/// Noir widths plus the planned arbitrary-width carrier cases.
+fn width() -> impl Strategy<Value = u32> {
+    proptest::sample::select(vec![8, 16, 32, 34, 64, 66, 128, 256, 65536])
 }
 
-/// The smallest supported width strictly greater than `bits` (saturating at the 128-bit max). Used
-/// so the cast round-trip exercises genuine widening instead of collapsing to a same-width no-op.
-fn wider_than(bits: u8) -> u8 {
+/// The smallest width in [`width`] strictly greater than `bits` (saturating at the 65536-bit max).
+/// Used so the cast round-trip exercises genuine widening instead of collapsing to a same-width
+/// no-op.
+fn wider_than(bits: u32) -> u32 {
     match bits {
         8 => 16,
         16 => 32,
-        32 => 64,
-        _ => 128,
+        32 => 34,
+        34 => 64,
+        64 => 66,
+        66 => 128,
+        128 => 256,
+        _ => 65536,
     }
 }
 
 /// An integer *type*: signedness paired with one of the supported widths.
-fn int_type() -> impl Strategy<Value = (bool, u8)> {
+fn int_type() -> impl Strategy<Value = (bool, u32)> {
     (any::<bool>(), width())
 }
 
 /// An in-range [`IntValue`] of the given type: draw a magnitude and a sign, then let
 /// [`IntValue::canonical`] wrap the raw value into the type's range (two's complement).
-fn int_value_of(signed: bool, bits: u8) -> impl Strategy<Value = IntValue> {
+fn int_value_of(signed: bool, bits: u32) -> impl Strategy<Value = IntValue> {
     (any::<u128>(), any::<bool>()).prop_map(move |(mag, neg)| {
         let raw = if neg {
             -BigInt::from(mag)
@@ -107,7 +112,8 @@ proptest! {
         prop_assert_eq!(&back.value, &v.value);
         prop_assert_eq!(flip.unsigned_repr(), v.unsigned_repr());
 
-        // (b) widen to the next larger width (genuine widening for bits < 128), then narrow back.
+        // (b) widen to the next larger width (genuine widening below the 65536-bit max), then
+        // narrow back.
         let bits2 = wider_than(bits);
         let wide = IntValue::canonical(signed, bits2, v.value.clone());
         prop_assert_eq!(&wide.value, &v.value);
@@ -124,7 +130,7 @@ proptest! {
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(false, bits, raw);
-        let amount = IntValue::canonical(false, bits, BigInt::from(bits as u32 + extra));
+        let amount = IntValue::canonical(false, bits, BigInt::from(bits + extra));
 
         let shl = eval_int_binary(BinaryOpKind::ShiftLeft, a.clone(), amount.clone());
         let shr = eval_int_binary(BinaryOpKind::ShiftRight, a, amount);
@@ -141,7 +147,7 @@ proptest! {
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(signed, bits, raw);
-        let amount = usize::from(amt_seed % bits);
+        let amount = usize::from(amt_seed) % (bits as usize);
         let b = IntValue::canonical(signed, bits, BigInt::from(amount));
 
         // Capture independent references BEFORE the operands are moved into `eval_int_binary`.
@@ -169,24 +175,21 @@ proptest! {
         );
     }
 
-    /// Integer-to-field encoding reduces the bit pattern modulo the active field.
+    /// Field encoding preserves the bit pattern or rejects the source width.
     #[test]
-    fn p4_field_roundtrip(
+    fn p4_field_encoding_checks_source_width(
         (signed, bits) in int_type(),
         (mag, neg) in (any::<u128>(), any::<bool>()),
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let iv = IntValue::canonical(signed, bits, raw);
 
-        let modulus = BigInt::from(FieldElement::modulus());
-        let repr = iv.unsigned_repr();
-        let field_back = field_to_bigint(&iv.to_field());
-
-        // Always: the field reduces the bit pattern mod the field modulus.
-        prop_assert_eq!(&field_back, &(&repr % &modulus));
-        // Exact identity only when the value fits below the modulus.
-        if repr < modulus {
-            prop_assert_eq!(field_back, repr);
+        match iv.try_to_field() {
+            Some(field) => {
+                prop_assert!(bits < FieldElement::max_num_bits());
+                prop_assert_eq!(field_to_bigint(&field), iv.unsigned_repr());
+            }
+            None => prop_assert!(bits >= FieldElement::max_num_bits()),
         }
     }
 
@@ -221,7 +224,7 @@ proptest! {
 /// Division/modulo by a zero divisor is `DivisionByZero` for every signedness/width.
 #[test]
 fn div_and_mod_by_zero_error() {
-    for (signed, bits) in [(false, 8u8), (true, 8), (false, 64), (true, 128)] {
+    for (signed, bits) in [(false, 8u32), (true, 8), (false, 64), (true, 128)] {
         let a = IntValue::canonical(signed, bits, BigInt::from(7));
         let zero = IntValue::canonical(signed, bits, BigInt::from(0));
         assert!(matches!(
@@ -239,7 +242,7 @@ fn div_and_mod_by_zero_error() {
 /// matching Rust's checked `div`/`rem`.
 #[test]
 fn signed_min_div_mod_neg_one_overflow() {
-    for bits in [8u8, 16, 32, 64, 128] {
+    for bits in [8u32, 16, 32, 64, 128] {
         let (min, _) = IntValue::range(true, bits);
         let a = IntValue::canonical(true, bits, min);
         let neg_one = IntValue::canonical(true, bits, -BigInt::from(1));

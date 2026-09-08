@@ -474,7 +474,8 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
 
 /// Check the return against the `return` recorded in `Prover.toml`: exactly under bn254, with
 /// `Field` values ignored under goldilocks because the corpus records bn254's. A recorded return
-/// the field cannot decode leaves the check not run.
+/// the parser refuses under this field, or one the input bridge does not decode, leaves the check
+/// not run.
 fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) -> StepOutcome {
     let Some(src) = prover_src else {
         return StepOutcome::not_run("no Prover.toml");
@@ -485,7 +486,10 @@ fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) 
     });
     match recorded {
         Err(StepOutcome::Failed { error, .. })
-            if matches!(error.kind, FailureKind::Unsupported { .. }) =>
+            if matches!(
+                error.kind,
+                FailureKind::Unsupported { .. } | FailureKind::InputError
+            ) =>
         {
             StepOutcome::not_run(format!("recorded return: {}", error.payload))
         }

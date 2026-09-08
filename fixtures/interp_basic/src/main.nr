@@ -30,9 +30,9 @@ fn main() {
     assert(t.0 == 7);
     assert(t.1 == 100);
 
-    // u64 -> Field cast: a field-dependent value, but the assert holds under any field.
-    let f: Field = p_minus_one as Field;
-    assert(f == 18446744069414584320);
+    // u32 -> Field is exact under both fields.
+    let f: Field = sum as Field;
+    assert(f == 45);
 
     let c: u32 = if sum > 40 { 1 } else { 0 };
     assert(c == 1);

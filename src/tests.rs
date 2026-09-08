@@ -3,11 +3,15 @@ use std::path::{Path, PathBuf};
 
 use super::corpus::{compile_error_of, copy_dir, corpus_dir, list_programs, panic_message};
 use super::diff::{FailureKind, comparable_error_of};
+#[cfg(not(feature = "goldilocks"))]
+use super::expected_return_from_prover_toml;
 use super::loader::NoirProject;
 use super::validation_frontend::compile_for_validation;
-use super::{IntValue, InterpretError, Value, inputs_from_prover_toml, interpret_with_inputs};
+use super::{
+    IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
+};
 #[cfg(not(feature = "goldilocks"))]
-use super::{expected_return_from_prover_toml, interpret};
+use acvm::FieldElement;
 use num_bigint::BigInt;
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
@@ -19,26 +23,30 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// A `neg_`-prefixed fixture: a program expected to fail to compile or assert.
-#[cfg(not(feature = "goldilocks"))]
 fn negative_fixture(name: &str) -> PathBuf {
     fixture(&format!("neg_{name}"))
 }
 
 /// Compile a fixture through Noir's frontend + monomorphizer and interpret the resulting AST.
-#[cfg(not(feature = "goldilocks"))]
 fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let project = NoirProject::new(fixture(name))?;
     let validated = compile_for_validation(&project)?;
     Ok(interpret(&validated.program)?)
 }
 
-/// Under bn254 the self-checking `interp_basic` program interprets to a clean `Unit` with every
-/// `assert` holding — the interpreter agrees with Noir's semantics on real monomorphized output.
-/// Gated off under goldilocks because the auto-injected bn254 stdlib does not compile for that field.
-#[cfg(not(feature = "goldilocks"))]
+/// The basic fixture checks arithmetic, control flow and casts under both fields.
 #[test]
 fn interprets_basic_corpus_program() {
     let result = interpret_fixture("interp_basic").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
+/// Integer-to-integer casts keep a `u64` above the Goldilocks modulus intact, at run time and in
+/// a `comptime` block.
+#[test]
+fn interprets_casts_above_the_modulus() {
+    let result =
+        interpret_fixture("interp_casts_above_modulus").expect("interpretation should succeed");
     assert_eq!(result, Value::Unit, "main returns unit");
 }
 
@@ -98,14 +106,14 @@ fn interprets_reached_dep_fixture_on_bn254() {
     let validated = compile_for_validation(&project).expect("clean compile under bn254");
     let x = Value::Int(IntValue {
         signed: false,
-        bits: 64,
-        value: BigInt::from(3u64),
+        bits: 32,
+        value: BigInt::from(3u32),
     });
     let result = interpret_with_inputs(&validated.program, vec![x]).expect("interpret");
     let expected = Value::Int(IntValue {
         signed: false,
-        bits: 64,
-        value: BigInt::from(2u64),
+        bits: 32,
+        value: BigInt::from(2u32),
     });
     assert_eq!(result, expected);
 }
@@ -175,23 +183,61 @@ fn bn254_decodes_signed_i64_input() {
     );
 }
 
-/// Under Goldilocks no i64 input is silently decoded: a negative exceeds the modulus, and an
-/// in-field positive is refused by the representability guard (i64's 2^64 range exceeds the field).
+/// `u64` can exceed the Goldilocks modulus, so the compiler refuses `x as Field` there.
 #[cfg(feature = "goldilocks")]
 #[test]
-fn goldilocks_rejects_unrepresentable_i64_input() {
+fn goldilocks_rejects_u64_to_field_cast() {
+    let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
+    let err = match compile_for_validation(&project) {
+        Ok(_) => panic!("u64 as Field must not compile under Goldilocks"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("cannot be cast to Field"), "{err}");
+}
+
+/// Under bn254 every `u64` is below the modulus and the cast is the identity on the value.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn bn254_casts_u64_to_field_exactly() {
+    let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
+    let validated = compile_for_validation(&project).expect("frontend");
+    let toml = format!("x = \"{}\"", u64::MAX);
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
+    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    assert_eq!(
+        result,
+        Value::Field(FieldElement::from(u128::from(u64::MAX)))
+    );
+}
+
+/// `-2^32` has the pattern `p - 1`; `-1` has the pattern `2^64 - 1`, which exceeds the modulus.
+#[cfg(feature = "goldilocks")]
+#[test]
+fn goldilocks_validates_i64_input_patterns() {
     let root = fixture("neg_interp_inputs_i64");
     let project = NoirProject::new(root).expect("project");
     let validated = compile_for_validation(&project).expect("frontend");
-    assert!(
-        inputs_from_prover_toml(&validated.program, &validated.abi, "x = \"-1\"").is_err(),
-        "goldilocks must reject a negative i64 input"
-    );
-    match inputs_from_prover_toml(&validated.program, &validated.abi, "x = \"1\"") {
-        Err(InterpretError::Unsupported(_)) => {}
-        other => panic!(
-            "the i64 representability guard should reject an in-field value too, got {other:?}"
-        ),
+    let run = |toml: &str| {
+        inputs_from_prover_toml(&validated.program, &validated.abi, toml)
+            .and_then(|inputs| interpret_with_inputs(&validated.program, inputs))
+    };
+    let expected = |v: i64| {
+        Value::Int(IntValue {
+            signed: true,
+            bits: 64,
+            value: BigInt::from(v),
+        })
+    };
+    for toml in ["x = -4294967296", "x = \"-4294967296\""] {
+        assert_eq!(run(toml).expect(toml), expected(-4294967296), "{toml}");
+    }
+    assert_eq!(run("x = \"1\"").expect("x = \"1\""), expected(1));
+    for toml in ["x = \"-1\"", "x = -1"] {
+        assert!(
+            matches!(run(toml), Err(InterpretError::InvalidInput(_))),
+            "{toml}"
+        );
     }
 }
 
@@ -520,6 +566,7 @@ fn oracle_matches_interpreter_smoke() {
         "interp_basic",
         "interp_inputs_u64",
         "interp_inputs_i32",
+        "interp_inputs_i64",
         "interp_inputs_struct",
         "interp_refs_struct_field",
         "interp_refs_call_chain",

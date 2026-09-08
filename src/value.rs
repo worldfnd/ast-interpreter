@@ -38,11 +38,11 @@ pub enum Value {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IntValue {
     pub signed: bool,
-    pub bits: u8,
+    pub bits: u32,
     pub value: BigInt,
 }
 
-fn pow2(bits: u8) -> BigInt {
+fn pow2(bits: u32) -> BigInt {
     BigInt::one() << bits as usize
 }
 
@@ -53,7 +53,7 @@ pub fn field_to_bigint(field: &FieldElement) -> BigInt {
 }
 
 /// Reduce `raw` into the canonical two's-complement representative for `(signed, bits)`.
-pub fn wrap(signed: bool, bits: u8, raw: BigInt) -> BigInt {
+pub fn wrap(signed: bool, bits: u32, raw: BigInt) -> BigInt {
     let modulus = pow2(bits);
     let mut u = raw % &modulus;
     if u.sign() == Sign::Minus {
@@ -69,7 +69,7 @@ impl IntValue {
     /// Construct by *wrapping* `raw` into the type's range (two's complement) — the truncating
     /// constructor used for casts, `!`, and wrapping shifts. For checked arithmetic, where an
     /// out-of-range value must be an overflow error instead, use [`IntValue::checked`].
-    pub fn canonical(signed: bool, bits: u8, raw: BigInt) -> Self {
+    pub fn canonical(signed: bool, bits: u32, raw: BigInt) -> Self {
         IntValue {
             signed,
             bits,
@@ -78,7 +78,7 @@ impl IntValue {
     }
 
     /// Inclusive `[min, max]` range for the type.
-    pub fn range(signed: bool, bits: u8) -> (BigInt, BigInt) {
+    pub fn range(signed: bool, bits: u32) -> (BigInt, BigInt) {
         if signed {
             let half = pow2(bits - 1);
             (-half.clone(), half - BigInt::one())
@@ -88,7 +88,7 @@ impl IntValue {
     }
 
     /// Construct from a result of checked arithmetic; error if it does not fit the type.
-    pub fn checked(signed: bool, bits: u8, raw: BigInt, op: &str) -> Result<Self, InterpretError> {
+    pub fn checked(signed: bool, bits: u32, raw: BigInt, op: &str) -> Result<Self, InterpretError> {
         let (min, max) = Self::range(signed, bits);
         if raw < min || raw > max {
             let sign = if signed { 'i' } else { 'u' };
@@ -111,10 +111,12 @@ impl IntValue {
         }
     }
 
-    /// Encode as a field element (the value's bit pattern reduced into the field).
-    pub fn to_field(&self) -> FieldElement {
-        let (_, bytes) = self.unsigned_repr().to_bytes_be();
-        FieldElement::from_be_bytes_reduce(&bytes)
+    /// Encode the bit pattern exactly; reject widths Noir does not allow in casts to `Field`.
+    pub fn try_to_field(&self) -> Option<FieldElement> {
+        (self.bits < FieldElement::max_num_bits()).then(|| {
+            let (_, bytes) = self.unsigned_repr().to_bytes_be();
+            FieldElement::from_be_bytes_reduce(&bytes)
+        })
     }
 }
 

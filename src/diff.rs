@@ -22,7 +22,7 @@ pub enum DiffValue {
     Field(String),
     Int {
         signed: bool,
-        bits: u8,
+        bits: u32,
         value: BigInt,
     },
     Bool(bool),

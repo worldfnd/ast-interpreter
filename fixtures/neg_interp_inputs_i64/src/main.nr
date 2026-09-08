@@ -1,6 +1,5 @@
-// Signed i64 input: its 2^64 range exceeds the Goldilocks modulus, so the two's-complement ABI
-// encoding is not injective there. The input bridge must reject it rather than decode a wrong
-// positive value; on bn254 the same input decodes correctly.
+// Signed i64 input: the ABI parser refuses `x = "-1"` under Goldilocks because its two's
+// complement pattern, 2^64 - 1, exceeds the modulus; bn254 decodes it.
 fn main(x: i64) -> pub i64 {
     x
 }
