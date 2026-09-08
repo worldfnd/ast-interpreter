@@ -173,23 +173,33 @@ fn bn254_decodes_signed_i64_input() {
     );
 }
 
-/// Under Goldilocks no i64 input is silently decoded: a negative exceeds the modulus, and an
-/// in-field positive is refused by the representability guard (i64's 2^64 range exceeds the field).
+/// `-2^32` has the pattern `p - 1`; `-1` has the pattern `2^64 - 1`, which exceeds the modulus.
 #[cfg(feature = "goldilocks")]
 #[test]
-fn goldilocks_rejects_unrepresentable_i64_input() {
+fn goldilocks_validates_i64_input_patterns() {
     let root = fixture("neg_interp_inputs_i64");
     let project = NoirProject::new(root).expect("project");
     let validated = compile_for_validation(&project).expect("frontend");
-    assert!(
-        inputs_from_prover_toml(&validated.program, &validated.abi, "x = \"-1\"").is_err(),
-        "goldilocks must reject a negative i64 input"
-    );
-    match inputs_from_prover_toml(&validated.program, &validated.abi, "x = \"1\"") {
-        Err(InterpretError::Unsupported(_)) => {}
-        other => panic!(
-            "the i64 representability guard should reject an in-field value too, got {other:?}"
-        ),
+    let run = |toml: &str| {
+        inputs_from_prover_toml(&validated.program, &validated.abi, toml)
+            .and_then(|inputs| interpret_with_inputs(&validated.program, inputs))
+    };
+    let expected = |v: i64| {
+        Value::Int(IntValue {
+            signed: true,
+            bits: 64,
+            value: BigInt::from(v),
+        })
+    };
+    for toml in ["x = -4294967296", "x = \"-4294967296\""] {
+        assert_eq!(run(toml).expect(toml), expected(-4294967296), "{toml}");
+    }
+    assert_eq!(run("x = \"1\"").expect("x = \"1\""), expected(1));
+    for toml in ["x = \"-1\"", "x = -1"] {
+        assert!(
+            matches!(run(toml), Err(InterpretError::InvalidInput(_))),
+            "{toml}"
+        );
     }
 }
 
@@ -518,6 +528,7 @@ fn oracle_matches_interpreter_smoke() {
         "interp_basic",
         "interp_inputs_u64",
         "interp_inputs_i32",
+        "interp_inputs_i64",
         "interp_inputs_struct",
         "interp_refs_struct_field",
         "interp_refs_call_chain",

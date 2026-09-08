@@ -2,12 +2,11 @@
 //!
 //! Noir's ABI parser yields an [`InputValue`] tree keyed by parameter name; we map each value onto
 //! the monomorphized parameter [`Type`], using the matching [`AbiType`] for the struct field
-//! ordering the lowered `Type::Tuple` loses. Integer inputs are decoded from their two's-complement
-//! field encoding and range-checked against the declared width, since the ABI parser only bounds
-//! them by the field modulus.
+//! ordering the lowered `Type::Tuple` loses. An integer input arrives as its fixed-width two's
+//! complement pattern; the parser has already refused any value whose pattern does not fit the
+//! field, so decoding that pattern is exact.
 
 use acvm::{AcirField, FieldElement};
-use num_bigint::BigInt;
 
 use noirc_abi::{
     Abi, AbiType, MAIN_RETURN_NAME,
@@ -24,8 +23,13 @@ pub fn inputs_from_prover_toml(
     abi: &Abi,
     toml_src: &str,
 ) -> Result<Vec<Value>, InterpretError> {
+    // An unrepresentable recorded return must not prevent parsing the inputs.
+    let parameters_only = Abi {
+        return_type: None,
+        ..abi.clone()
+    };
     let map = Format::Toml
-        .parse(toml_src, abi)
+        .parse(toml_src, &parameters_only)
         .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
 
     let main = super::main_function_of(program)?;
@@ -85,18 +89,8 @@ pub(crate) fn value_from_input(
         (InputValue::Field(field), Type::Field) => Ok(Value::Field(*field)),
         (InputValue::Field(field), Type::Integer(signedness, bits)) => {
             let width = u32::from(bits.bit_size());
-            // noirc_abi encodes signed ints as two's complement (2^width + x) mod p; when
-            // 2^width > p the map collides (Goldilocks i64 -1 and +4294967294 share a field
-            // element), so the value is already lost and cannot be recovered here.
-            if signedness.is_signed() && (BigInt::from(1u8) << width as usize) > field_modulus() {
-                return Err(InterpretError::Unsupported(format!(
-                    "signed {width}-bit ABI input is not representable in this field"
-                )));
-            }
-            // The ABI parser only checks `value < field_modulus`, not `value < 2^bits`, so reject a
-            // valid-but-oversized input rather than silently truncate. A valid witness holds the
-            // value's two's-complement bit pattern in `[0, 2^bits)`.
             let raw = field_to_bigint(field);
+            // Guards values the parser never saw: the executor oracle decodes ACVM returns here.
             if raw.bits() > u64::from(width) {
                 return Err(InterpretError::InvalidInput(format!(
                     "integer input does not fit a {width}-bit type"
@@ -197,9 +191,4 @@ pub(crate) fn value_from_input(
             "input value {input:?} for parameter type {typ:?}"
         ))),
     }
-}
-
-/// The build's field modulus as a `BigInt`, for the signed-representability check.
-fn field_modulus() -> BigInt {
-    BigInt::from(FieldElement::modulus())
 }

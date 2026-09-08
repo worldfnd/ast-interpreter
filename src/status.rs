@@ -43,7 +43,6 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
     ("regression_7962", &[Capability::UnsignedFits(64)]),
     ("regression_8009", &[Capability::SignedFits(64)]),
     ("regression_8261", &[Capability::FieldBitsAtLeast(254)]),
-    ("regression_8726", &[Capability::SignedFits(64)]),
     (
         "regression_brillig_const_fold_self_dedup",
         &[Capability::FieldBitsAtLeast(254)],
@@ -52,7 +51,6 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         "regression_struct_array_conditional",
         &[Capability::FieldBitsAtLeast(254)],
     ),
-    ("signed_truncation", &[Capability::SignedFits(64)]),
     ("unsigned_to_signed_cast", &[Capability::UnsignedFits(64)]),
     (
         "fixtures/neg_interp_inputs_i64",
@@ -88,6 +86,7 @@ const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
 const PROJECTION_INVARIANT_FIXTURES: &[&str] = &[
     "interp_inputs_u64",
     "interp_inputs_i32",
+    "interp_inputs_i64",
     "interp_inputs_struct",
     "interp_inputs_mixed",
     "interp_refs_call_chain",
