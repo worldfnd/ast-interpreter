@@ -10,6 +10,8 @@ use super::validation_frontend::compile_for_validation;
 use super::{
     IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
 };
+#[cfg(not(feature = "goldilocks"))]
+use acvm::FieldElement;
 use num_bigint::BigInt;
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
@@ -21,7 +23,6 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// A `neg_`-prefixed fixture: a program expected to fail to compile or assert.
-#[cfg(not(feature = "goldilocks"))]
 fn negative_fixture(name: &str) -> PathBuf {
     fixture(&format!("neg_{name}"))
 }
@@ -179,6 +180,34 @@ fn bn254_decodes_signed_i64_input() {
             bits: 64,
             value: BigInt::from(-1)
         })
+    );
+}
+
+/// `u64` can exceed the Goldilocks modulus, so the compiler refuses `x as Field` there.
+#[cfg(feature = "goldilocks")]
+#[test]
+fn goldilocks_rejects_u64_to_field_cast() {
+    let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
+    let err = match compile_for_validation(&project) {
+        Ok(_) => panic!("u64 as Field must not compile under Goldilocks"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("cannot be cast to Field"), "{err}");
+}
+
+/// Under bn254 every `u64` is below the modulus and the cast is the identity on the value.
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn bn254_casts_u64_to_field_exactly() {
+    let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
+    let validated = compile_for_validation(&project).expect("frontend");
+    let toml = format!("x = \"{}\"", u64::MAX);
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
+    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    assert_eq!(
+        result,
+        Value::Field(FieldElement::from(u128::from(u64::MAX)))
     );
 }
 

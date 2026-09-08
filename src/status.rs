@@ -35,8 +35,9 @@ fn dump_path(tag: &str) -> PathBuf {
     dump_dir().join(format!("{tag}.json"))
 }
 
-/// Programs whose inputs or recorded return need a field property; a side whose field lacks it
-/// cannot run them. An entry whose row is not `predicted` is stale.
+/// Programs whose inputs, recorded return or casts to `Field` need a field property; a side whose
+/// field lacks it cannot run them. An input is tagged only when its values do not fit. An entry
+/// whose row is not `predicted` is stale.
 const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
     ("bit_shifts_runtime", &[Capability::SignedFits(64)]),
     ("bit_shifts_u128", &[Capability::UnsignedFits(128)]),
@@ -52,6 +53,10 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         &[Capability::FieldBitsAtLeast(254)],
     ),
     ("unsigned_to_signed_cast", &[Capability::UnsignedFits(64)]),
+    (
+        "fixtures/neg_interp_cast_u64_to_field",
+        &[Capability::UnsignedFits(64)],
+    ),
     (
         "fixtures/neg_interp_inputs_i64",
         &[Capability::SignedFits(64)],
