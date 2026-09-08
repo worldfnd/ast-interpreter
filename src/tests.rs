@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 
 use super::corpus::{compile_error_of, copy_dir, corpus_dir, list_programs, panic_message};
 use super::diff::{FailureKind, comparable_error_of};
+#[cfg(not(feature = "goldilocks"))]
+use super::expected_return_from_prover_toml;
 use super::loader::NoirProject;
 use super::validation_frontend::compile_for_validation;
-use super::{IntValue, InterpretError, Value, inputs_from_prover_toml, interpret_with_inputs};
-#[cfg(not(feature = "goldilocks"))]
-use super::{expected_return_from_prover_toml, interpret};
+use super::{
+    IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
+};
 use num_bigint::BigInt;
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
@@ -25,17 +27,13 @@ fn negative_fixture(name: &str) -> PathBuf {
 }
 
 /// Compile a fixture through Noir's frontend + monomorphizer and interpret the resulting AST.
-#[cfg(not(feature = "goldilocks"))]
 fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let project = NoirProject::new(fixture(name))?;
     let validated = compile_for_validation(&project)?;
     Ok(interpret(&validated.program)?)
 }
 
-/// Under bn254 the self-checking `interp_basic` program interprets to a clean `Unit` with every
-/// `assert` holding — the interpreter agrees with Noir's semantics on real monomorphized output.
-/// Gated off under goldilocks because the auto-injected bn254 stdlib does not compile for that field.
-#[cfg(not(feature = "goldilocks"))]
+/// The basic fixture checks arithmetic, control flow and casts under both fields.
 #[test]
 fn interprets_basic_corpus_program() {
     let result = interpret_fixture("interp_basic").expect("interpretation should succeed");
@@ -98,14 +96,14 @@ fn interprets_reached_dep_fixture_on_bn254() {
     let validated = compile_for_validation(&project).expect("clean compile under bn254");
     let x = Value::Int(IntValue {
         signed: false,
-        bits: 64,
-        value: BigInt::from(3u64),
+        bits: 32,
+        value: BigInt::from(3u32),
     });
     let result = interpret_with_inputs(&validated.program, vec![x]).expect("interpret");
     let expected = Value::Int(IntValue {
         signed: false,
-        bits: 64,
-        value: BigInt::from(2u64),
+        bits: 32,
+        value: BigInt::from(2u32),
     });
     assert_eq!(result, expected);
 }
