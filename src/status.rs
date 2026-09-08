@@ -92,6 +92,7 @@ const PROJECTION_INVARIANT_FIXTURES: &[&str] = &[
     "interp_refs_call_chain",
     "interp_match_enum",
     "interp_match_int",
+    "interp_casts_above_modulus",
 ];
 
 fn is_allowlisted(name: &str) -> bool {

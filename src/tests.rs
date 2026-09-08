@@ -40,6 +40,15 @@ fn interprets_basic_corpus_program() {
     assert_eq!(result, Value::Unit, "main returns unit");
 }
 
+/// Integer-to-integer casts keep a `u64` above the Goldilocks modulus intact, at run time and in
+/// a `comptime` block.
+#[test]
+fn interprets_casts_above_the_modulus() {
+    let result =
+        interpret_fixture("interp_casts_above_modulus").expect("interpretation should succeed");
+    assert_eq!(result, Value::Unit, "main returns unit");
+}
+
 /// A false (non-const-folded) assertion interprets to `AssertionFailed`, not a clean pass.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
