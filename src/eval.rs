@@ -343,17 +343,20 @@ impl<'p> Interpreter<'p> {
         env: &mut Frame,
     ) -> Result<Value, InterpretError> {
         let value = match literal {
-            // The integer literal carries a signed `BigInt` (previously a `SignedField`).
+            // Integer literals carry a signed `BigInt`.
             Literal::Integer(value, typ, _) => match typ {
                 // A Field literal's `BigInt` is the signed representative; `bigint_to_field` reduces
-                // it into the compiled-in field (a negative value maps to `modulus - |value|`),
-                // matching Noir's removed `SignedField::to_field_element`.
+                // it into the compiled-in field (a negative value maps to `modulus - |value|`).
                 Type::Field => Value::Field(bigint_to_field(value)),
                 Type::Integer(signedness, bits) => {
                     let signed = signedness.is_signed();
                     // `canonical` wraps the mathematical value into the type's range (identity for a
-                    // well-formed literal), replacing the old `SignedField` → i128/u128 conversion.
-                    Value::Int(IntValue::canonical(signed, bits.bit_size(), value.clone()))
+                    // well-formed literal).
+                    Value::Int(IntValue::canonical(
+                        signed,
+                        u32::from(bits.bit_size()),
+                        value.clone(),
+                    ))
                 }
                 other => {
                     return Err(InterpretError::Type(format!(
@@ -528,7 +531,7 @@ impl<'p> Interpreter<'p> {
             },
             Type::Integer(signedness, bits) => {
                 let signed = signedness.is_signed();
-                let width = bits.bit_size();
+                let width = u32::from(bits.bit_size());
                 let raw = match value {
                     Value::Int(int) => int.value,
                     Value::Bool(b) => BigInt::from(b as u8),
@@ -1289,15 +1292,16 @@ fn shift_amount(b: &IntValue) -> Result<usize, InterpretError> {
     }
 }
 
-fn int_type(typ: &Type) -> Option<(bool, u8)> {
+fn int_type(typ: &Type) -> Option<(bool, u32)> {
     match typ {
-        Type::Integer(signedness, bits) => Some((signedness.is_signed(), bits.bit_size())),
+        Type::Integer(signedness, bits) => {
+            Some((signedness.is_signed(), u32::from(bits.bit_size())))
+        }
         _ => None,
     }
 }
 
-/// Reduce a signed `BigInt` literal into the compiled-in field, replicating Noir's removed
-/// `SignedField::to_field_element` / `bigint_to_field`: a negative value maps to `modulus - |value|`.
+/// Reduce a signed literal into the field; negative values map to `modulus - |value|`.
 fn bigint_to_field(value: &BigInt) -> FieldElement {
     let (sign, magnitude) = value.to_bytes_be();
     let field = FieldElement::from_be_bytes_reduce(&magnitude);
@@ -1313,7 +1317,7 @@ fn bigint_to_field(value: &BigInt) -> FieldElement {
 mod semantics_tests {
     use super::*;
 
-    fn int(signed: bool, bits: u8, v: i128) -> IntValue {
+    fn int(signed: bool, bits: u32, v: i128) -> IntValue {
         IntValue::canonical(signed, bits, BigInt::from(v))
     }
 

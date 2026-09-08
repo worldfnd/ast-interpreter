@@ -14,13 +14,13 @@ use crate::eval::eval_int_binary;
 use crate::value::{IntValue, Value, field_to_bigint, wrap};
 
 /// The integer widths this crate supports (bit sizes of Noir's `u*`/`i*` types).
-fn width() -> impl Strategy<Value = u8> {
-    prop_oneof![Just(8u8), Just(16u8), Just(32u8), Just(64u8), Just(128u8),]
+fn width() -> impl Strategy<Value = u32> {
+    prop_oneof![Just(8u32), Just(16u32), Just(32u32), Just(64u32), Just(128u32),]
 }
 
 /// The smallest supported width strictly greater than `bits` (saturating at the 128-bit max). Used
 /// so the cast round-trip exercises genuine widening instead of collapsing to a same-width no-op.
-fn wider_than(bits: u8) -> u8 {
+fn wider_than(bits: u32) -> u32 {
     match bits {
         8 => 16,
         16 => 32,
@@ -30,13 +30,13 @@ fn wider_than(bits: u8) -> u8 {
 }
 
 /// An integer *type*: signedness paired with one of the supported widths.
-fn int_type() -> impl Strategy<Value = (bool, u8)> {
+fn int_type() -> impl Strategy<Value = (bool, u32)> {
     (any::<bool>(), width())
 }
 
 /// An in-range [`IntValue`] of the given type: draw a magnitude and a sign, then let
 /// [`IntValue::canonical`] wrap the raw value into the type's range (two's complement).
-fn int_value_of(signed: bool, bits: u8) -> impl Strategy<Value = IntValue> {
+fn int_value_of(signed: bool, bits: u32) -> impl Strategy<Value = IntValue> {
     (any::<u128>(), any::<bool>()).prop_map(move |(mag, neg)| {
         let raw = if neg {
             -BigInt::from(mag)
@@ -124,7 +124,7 @@ proptest! {
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(false, bits, raw);
-        let amount = IntValue::canonical(false, bits, BigInt::from(bits as u32 + extra));
+        let amount = IntValue::canonical(false, bits, BigInt::from(bits + extra));
 
         let shl = eval_int_binary(BinaryOpKind::ShiftLeft, a.clone(), amount.clone());
         let shr = eval_int_binary(BinaryOpKind::ShiftRight, a, amount);
@@ -141,7 +141,7 @@ proptest! {
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(signed, bits, raw);
-        let amount = usize::from(amt_seed % bits);
+        let amount = usize::from(amt_seed) % (bits as usize);
         let b = IntValue::canonical(signed, bits, BigInt::from(amount));
 
         // Capture independent references BEFORE the operands are moved into `eval_int_binary`.
@@ -221,7 +221,7 @@ proptest! {
 /// Division/modulo by a zero divisor is `DivisionByZero` for every signedness/width.
 #[test]
 fn div_and_mod_by_zero_error() {
-    for (signed, bits) in [(false, 8u8), (true, 8), (false, 64), (true, 128)] {
+    for (signed, bits) in [(false, 8u32), (true, 8), (false, 64), (true, 128)] {
         let a = IntValue::canonical(signed, bits, BigInt::from(7));
         let zero = IntValue::canonical(signed, bits, BigInt::from(0));
         assert!(matches!(
@@ -239,7 +239,7 @@ fn div_and_mod_by_zero_error() {
 /// matching Rust's checked `div`/`rem`.
 #[test]
 fn signed_min_div_mod_neg_one_overflow() {
-    for bits in [8u8, 16, 32, 64, 128] {
+    for bits in [8u32, 16, 32, 64, 128] {
         let (min, _) = IntValue::range(true, bits);
         let a = IntValue::canonical(true, bits, min);
         let neg_one = IntValue::canonical(true, bits, -BigInt::from(1));

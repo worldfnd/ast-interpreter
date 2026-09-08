@@ -84,7 +84,7 @@ pub(crate) fn value_from_input(
     match (input, typ) {
         (InputValue::Field(field), Type::Field) => Ok(Value::Field(*field)),
         (InputValue::Field(field), Type::Integer(signedness, bits)) => {
-            let width = bits.bit_size();
+            let width = u32::from(bits.bit_size());
             // noirc_abi encodes signed ints as two's complement (2^width + x) mod p; when
             // 2^width > p the map collides (Goldilocks i64 -1 and +4294967294 share a field
             // element), so the value is already lost and cannot be recovered here.
@@ -97,7 +97,7 @@ pub(crate) fn value_from_input(
             // valid-but-oversized input rather than silently truncate. A valid witness holds the
             // value's two's-complement bit pattern in `[0, 2^bits)`.
             let raw = field_to_bigint(field);
-            if raw.bits() > width as u64 {
+            if raw.bits() > u64::from(width) {
                 return Err(InterpretError::InvalidInput(format!(
                     "integer input does not fit a {width}-bit type"
                 )));
