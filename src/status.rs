@@ -15,8 +15,8 @@ use super::corpus::{
     hex, list_programs, noir_checkout, provenance, run_record,
 };
 use super::diff::{
-    CrossFieldDump, DiffOutcome, DumpProvenance, FailureKind, RunRecord, StepOutcome,
-    is_coverage_gap, outcome_is_tolerated, outcomes_equivalent,
+    ComparableError, CrossFieldDump, DiffOutcome, DumpProvenance, FailureKind, RunRecord,
+    StepOutcome, is_coverage_gap, outcome_is_tolerated, outcomes_equivalent,
 };
 use super::projection::PROJECTION_VERSION;
 
@@ -117,7 +117,7 @@ enum Verdict {
     Equal,
     /// Same value up to `Field` elements.
     EqualModuloField,
-    /// One side cannot run the program and a capability tag says why.
+    /// One side cannot compile or run the program and a capability tag says why.
     PredictedGap,
     /// A divergence or gap the allowlist records as field-dependent by design.
     FieldDependent,
@@ -171,20 +171,28 @@ fn classify(name: &str, a: &DiffOutcome, b: &DiffOutcome, sides: &Sides) -> Verd
     let allowlisted = is_allowlisted(name);
     match outcomes_equivalent(a, b) {
         Err(_) => {
-            let rejected_input = match (a, b) {
+            // A side may refuse the program by field width: its inputs (`InputError`) or a cast
+            // to `Field` from a type that can exceed its modulus (`CompileError`).
+            let refused = |error: &ComparableError| {
+                matches!(
+                    error.kind,
+                    FailureKind::InputError | FailureKind::CompileError
+                )
+            };
+            let refusing_side = match (a, b) {
                 (DiffOutcome::Returned(_), DiffOutcome::Errored { error, .. })
-                    if error.kind == FailureKind::InputError =>
+                    if refused(error) =>
                 {
                     Some(&sides.goldilocks)
                 }
                 (DiffOutcome::Errored { error, .. }, DiffOutcome::Returned(_))
-                    if error.kind == FailureKind::InputError =>
+                    if refused(error) =>
                 {
                     Some(&sides.bn254)
                 }
                 _ => None,
             };
-            if rejected_input.is_some_and(|modulus| predicted_gap(name, modulus)) {
+            if refusing_side.is_some_and(|modulus| predicted_gap(name, modulus)) {
                 Verdict::PredictedGap
             } else if allowlisted && divergence_is_allowlistable(a, b) {
                 Verdict::FieldDependent
@@ -329,7 +337,7 @@ fn render_status(provenance: &DumpProvenance, rows: &[Row]) -> String {
          `Prover.toml` (exact under bn254; `Field` values ignored under goldilocks, whose corpus \
          records bn254 values): ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two sides: \
          `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field \
-         property the program's inputs or recorded return need; `field-dependent`, allowlisted as \
+         property the program's inputs, recorded return or casts need; `field-dependent`, allowlisted as \
          field-dependent by design; `dependency`, one side reaches stdlib code that does not \
          elaborate under its field; `both-sides`, neither side ran it; `unexpected`, a one-sided \
          gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest. \
@@ -715,17 +723,20 @@ mod tests {
     }
 
     #[test]
-    fn rejected_inputs_are_a_predicted_gap_only_under_a_tag() {
+    fn width_refusals_are_a_predicted_gap_only_under_a_tag() {
         let rejected = errored(FailureKind::InputError, "value too large");
-        assert_eq!(
-            verdict("bit_shifts_u128", &returned("1"), &rejected),
-            Verdict::PredictedGap
-        );
-        assert_eq!(verdict("p", &returned("1"), &rejected), Verdict::Divergence);
-        assert_eq!(
-            verdict("bit_shifts_u128", &rejected, &returned("1")),
-            Verdict::Divergence
-        );
+        let refused = errored(FailureKind::CompileError, "u128 cannot be cast to Field");
+        for gap in [&rejected, &refused] {
+            assert_eq!(
+                verdict("bit_shifts_u128", &returned("1"), gap),
+                Verdict::PredictedGap
+            );
+            assert_eq!(verdict("p", &returned("1"), gap), Verdict::Divergence);
+            assert_eq!(
+                verdict("bit_shifts_u128", gap, &returned("1")),
+                Verdict::Divergence
+            );
+        }
     }
 
     #[test]
