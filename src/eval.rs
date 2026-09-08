@@ -512,13 +512,19 @@ impl<'p> Interpreter<'p> {
     fn eval_cast(&self, value: Value, target: &Type) -> Result<Value, InterpretError> {
         match target {
             Type::Field => match value {
-                // Noir rejects signed-to-Field casts at type-check (`UnsupportedFieldCast`);
-                // inventing a semantics here would silently bless an ill-typed AST.
+                // Noir admits a cast to Field only from an unsigned type narrower than the field
+                // (`UnsupportedFieldCast`, `IntegerTypeExceedsField`); inventing a semantics here
+                // would silently bless an ill-typed AST.
                 Value::Int(int) if int.signed => Err(InterpretError::Type(
                     "cast of a signed integer to Field (rejected by Noir's type checker)"
                         .to_string(),
                 )),
-                Value::Int(int) => Ok(Value::Field(int.to_field())),
+                Value::Int(int) => int.try_to_field().map(Value::Field).ok_or_else(|| {
+                    InterpretError::Type(format!(
+                        "cast of a u{} to Field (rejected by Noir's type checker)",
+                        int.bits
+                    ))
+                }),
                 Value::Bool(b) => Ok(Value::Field(if b {
                     FieldElement::one()
                 } else {

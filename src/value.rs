@@ -111,10 +111,12 @@ impl IntValue {
         }
     }
 
-    /// Encode as a field element (the value's bit pattern reduced into the field).
-    pub fn to_field(&self) -> FieldElement {
-        let (_, bytes) = self.unsigned_repr().to_bytes_be();
-        FieldElement::from_be_bytes_reduce(&bytes)
+    /// Encode the bit pattern exactly; reject widths Noir does not allow in casts to `Field`.
+    pub fn try_to_field(&self) -> Option<FieldElement> {
+        (self.bits < FieldElement::max_num_bits()).then(|| {
+            let (_, bytes) = self.unsigned_repr().to_bytes_be();
+            FieldElement::from_be_bytes_reduce(&bytes)
+        })
     }
 }
 

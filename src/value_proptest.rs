@@ -175,24 +175,21 @@ proptest! {
         );
     }
 
-    /// Integer-to-field encoding reduces the bit pattern modulo the active field.
+    /// Field encoding preserves the bit pattern or rejects the source width.
     #[test]
-    fn p4_field_roundtrip(
+    fn p4_field_encoding_checks_source_width(
         (signed, bits) in int_type(),
         (mag, neg) in (any::<u128>(), any::<bool>()),
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let iv = IntValue::canonical(signed, bits, raw);
 
-        let modulus = BigInt::from(FieldElement::modulus());
-        let repr = iv.unsigned_repr();
-        let field_back = field_to_bigint(&iv.to_field());
-
-        // Always: the field reduces the bit pattern mod the field modulus.
-        prop_assert_eq!(&field_back, &(&repr % &modulus));
-        // Exact identity only when the value fits below the modulus.
-        if repr < modulus {
-            prop_assert_eq!(field_back, repr);
+        match iv.try_to_field() {
+            Some(field) => {
+                prop_assert!(bits < FieldElement::max_num_bits());
+                prop_assert_eq!(field_to_bigint(&field), iv.unsigned_repr());
+            }
+            None => prop_assert!(bits >= FieldElement::max_num_bits()),
         }
     }
 
