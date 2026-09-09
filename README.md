@@ -5,6 +5,11 @@ A small Rust interpreter for Noir's monomorphized AST (`noirc_frontend::monomorp
 It runs over bn254 or Goldilocks and compares field-independent values such as integers, booleans,
 arrays, tuples, and structs. Cross-field comparisons ignore differences in `Field` values.
 
+A `Field` value carries the field it belongs to, and the interpreter takes its field from the label
+the monomorphized program was compiled under, so one build runs a program under any supported
+field. What the crate is *linked* against still matters for the parts that hold an
+`acvm::FieldElement`: the ABI input parser and the ACVM executor oracle.
+
 ## Using it
 
 ```toml
@@ -13,8 +18,10 @@ ast-interpreter = { git = "https://github.com/worldfnd/ast-interpreter.git", rev
 ```
 
 Use `interpret` for self-checking programs with no inputs, or `interpret_with_inputs` when `main` takes
-arguments. For `Prover.toml` inputs, use `inputs_from_prover_toml` and
-`expected_return_from_prover_toml`.
+arguments. Both take the `FieldId` the program was compiled under, which
+`MonomorphizationOutput::field_id` records. For `Prover.toml` inputs, use `inputs_from_prover_toml`
+and `expected_return_from_prover_toml`, which take the same field and refuse an input it cannot
+hold.
 
 Crates that pass Noir AST values into this interpreter must use the same pinned `noirc_frontend` and
 `acvm` sources, spelled the same way. Cargo keys a git dependency on the URL *and* the reference, so

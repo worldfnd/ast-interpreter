@@ -345,8 +345,8 @@ impl<'p> Interpreter<'p> {
         let value = match literal {
             // Integer literals carry a signed `BigInt`.
             Literal::Integer(value, typ, _) => match typ {
-                // A Field literal's `BigInt` is the signed representative; `bigint_to_field` reduces
-                // it into the compiled-in field (a negative value maps to `modulus - |value|`).
+                // A Field literal's `BigInt` is the signed representative; a negative value is
+                // the negation of its magnitude in the field the program was compiled for.
                 Type::Field => Value::Field(bigint_to_field(value, self.field)?),
                 Type::Integer(signedness, bits) => {
                     let signed = signedness.is_signed();

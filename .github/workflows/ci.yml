@@ -36,6 +36,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `features` links the crate against the field it sweeps. The interpreter takes its field
+        # from the program, but `Prover.toml` inputs still reach it through the ABI parser, which
+        # reads them in the linked field, so `make sweep` refuses a build linked elsewhere.
         include:
           - field: bn254
             features: ""

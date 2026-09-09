@@ -99,9 +99,12 @@ pub(crate) fn value_from_input(
     field_config: FieldConfig,
 ) -> Result<Value, InterpretError> {
     match (input, typ) {
-        // The ABI parser reads values in the field the compiler is linked against; until it takes
-        // a field of its own, a `Field` input crosses into the interpreted field here and is
-        // refused when that field cannot hold it.
+        // The ABI parser reads values in the field the compiler is linked against, and the
+        // entry-point rule tells a native `-1` from a quoted `p - 1` by their source syntax, which
+        // an `InputValue::Field` has already erased: both arrive as the same element. Re-homing
+        // one in another field would have to guess, so this takes the representative as it stands
+        // and refuses what the interpreted field has no value for. Identity when the two fields
+        // are the same, which is what the corpus sweep runs.
         (InputValue::Field(field), Type::Field) => {
             let value = FieldValue::from_linked_element(*field);
             FieldValue::try_from_biguint(value.as_biguint().clone(), field_config.id())
@@ -122,11 +125,19 @@ pub(crate) fn value_from_input(
                     "integer input does not fit a {width}-bit type"
                 )));
             }
-            Ok(Value::Int(IntValue::canonical(
-                signedness.is_signed(),
-                width,
-                raw,
-            )))
+            let value = IntValue::canonical(signedness.is_signed(), width, raw);
+            // The entry point encodes every scalar as exactly one field element, so an integer
+            // crosses it only if its unsigned fixed-width bit pattern is a value of the field. The
+            // ABI parser applies that rule for the field it is linked against; the interpreted
+            // field needs it applied again, or a build linked to a wider field would silently
+            // accept inputs a narrower one refuses.
+            if FieldValue::try_from_bigint(&value.unsigned_repr(), field_config.id()).is_none() {
+                return Err(InterpretError::InvalidInput(format!(
+                    "the bit pattern of this {width}-bit input is not a value of {}",
+                    field_config.name()
+                )));
+            }
+            Ok(Value::Int(value))
         }
         (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(!field.is_zero())),
         (InputValue::Vec(elements), Type::Array(length, element_type)) => {
