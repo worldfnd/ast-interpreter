@@ -1,8 +1,9 @@
 //! A tree-walking interpreter for Noir's monomorphized AST.
 //!
-//! Integers are kept as native `BigInt` values with explicit width and signedness; `Field` values
-//! use the compiled-in [`acvm::FieldElement`]. Running the same program under bn254 and Goldilocks
-//! then lets tests compare the field-independent results (integers, bools, arrays, tuples, structs).
+//! Integers are kept as native `BigInt` values with explicit width and signedness; a `Field` value
+//! carries the field it belongs to, taken from the label the monomorphized program was compiled
+//! under. One build therefore interprets a program under any supported field, and tests compare
+//! the field-independent results (integers, bools, arrays, tuples, structs) across two of them.
 
 #[cfg(feature = "mavros-oracle")]
 compile_error!(
@@ -48,6 +49,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use acvm::{FieldConfig, FieldId};
 use noirc_frontend::monomorphization::ast::{FuncId, Function, GlobalId, LocalId, Program};
 
 /// Per-call-frame local environment: each `LocalId` is unique within a monomorphized function.
@@ -67,6 +69,8 @@ enum GlobalState {
 
 pub(crate) struct Interpreter<'p> {
     program: &'p Program,
+    /// The field this program was compiled under; every `Field` value it makes belongs to it.
+    field: FieldConfig,
     globals: HashMap<GlobalId, GlobalState>,
     /// Whether the current function is unconstrained; drives `is_unconstrained()`. The monomorphizer
     /// emits a separate variant per function, so this is just the current function's own flag.
@@ -75,8 +79,11 @@ pub(crate) struct Interpreter<'p> {
 
 /// Interpret `program`'s entry point with no inputs (for self-checking programs whose `main`
 /// takes no parameters).
-pub fn interpret(program: &Program) -> Result<Value, InterpretError> {
-    interpret_with_inputs(program, Vec::new())
+///
+/// `field` must be the field the program was compiled under, which
+/// `MonomorphizationOutput::field_id` records.
+pub fn interpret(program: &Program, field: FieldId) -> Result<Value, InterpretError> {
+    interpret_with_inputs(program, Vec::new(), field)
 }
 
 /// Interpret `program`'s entry point, binding `inputs` to `main`'s parameters in order.
@@ -85,8 +92,9 @@ pub fn interpret(program: &Program) -> Result<Value, InterpretError> {
 pub fn interpret_with_inputs(
     program: &Program,
     inputs: Vec<Value>,
+    field: FieldId,
 ) -> Result<Value, InterpretError> {
-    let mut interp = Interpreter::new(program);
+    let mut interp = Interpreter::new(program, field);
     let main = main_function_of(program)?;
     if main.parameters.len() != inputs.len() {
         return Err(InterpretError::InvalidInput(format!(
@@ -112,9 +120,10 @@ pub(crate) fn main_function_of(program: &Program) -> Result<&Function, Interpret
 }
 
 impl<'p> Interpreter<'p> {
-    fn new(program: &'p Program) -> Self {
+    fn new(program: &'p Program, field: FieldId) -> Self {
         Interpreter {
             program,
+            field: FieldConfig::new(field),
             globals: HashMap::new(),
             unconstrained: false,
         }

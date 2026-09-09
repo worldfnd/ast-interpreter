@@ -2,7 +2,7 @@
 //! arithmetic, casts, shifts, division/modulo, and integer-to-field encoding across supported
 //! fields. Scope is value logic only — no ASTs, interpreter, or Noir project compilation.
 
-use acvm::{AcirField, FieldElement};
+use acvm::FieldConfig;
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
 use proptest::prelude::*;
@@ -184,12 +184,13 @@ proptest! {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let iv = IntValue::canonical(signed, bits, raw);
 
-        match iv.try_to_field() {
+        let config = FieldConfig::linked();
+        match iv.try_to_field(config) {
             Some(field) => {
-                prop_assert!(bits < FieldElement::max_num_bits());
+                prop_assert!(config.fits_unsigned(bits));
                 prop_assert_eq!(field_to_bigint(&field), iv.unsigned_repr());
             }
-            None => prop_assert!(bits >= FieldElement::max_num_bits()),
+            None => prop_assert!(!config.fits_unsigned(bits)),
         }
     }
 

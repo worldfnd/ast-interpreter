@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use acvm::FieldId;
 use fm::{FileId, FileManager};
 use nargo::package::Package;
 use noirc_abi::Abi;
@@ -24,6 +25,9 @@ pub(crate) trait PackageSource {
 pub(crate) struct Validated {
     pub program: Program,
     pub abi: Abi,
+    /// The field the program was compiled under, taken from the monomorphizer's own label rather
+    /// than from what was asked for.
+    pub field_id: FieldId,
 }
 
 /// `summary` is the diagnostic text without spans or file ids; `detail` is the full debug
@@ -85,6 +89,7 @@ fn diagnostic_summary(diagnostics: &[CustomDiagnostic]) -> String {
 /// the monomorphized program.
 pub(crate) fn compile_for_validation(
     source: &impl PackageSource,
+    field: FieldId,
 ) -> Result<Validated, ValidationError> {
     let (mut context, crate_id) = nargo::prepare_package(
         source.file_manager(),
@@ -92,12 +97,13 @@ pub(crate) fn compile_for_validation(
         source.get_only_crate(),
     );
 
-    let check_result = noirc_driver::check_crate(
-        &mut context,
-        crate_id,
-        &noirc_driver::CompileOptions::default(),
-    );
-    let tolerated_files = tolerated_dependency_error_files(&context, crate_id, check_result)?;
+    let options = noirc_driver::CompileOptions {
+        field,
+        ..noirc_driver::CompileOptions::default()
+    };
+    let check_result = noirc_driver::check_crate(&mut context, crate_id, &options);
+    let tolerated_files =
+        tolerated_dependency_error_files(&context, crate_id, check_result, field)?;
 
     let main = context
         .get_main_function(context.root_crate_id())
@@ -121,8 +127,21 @@ pub(crate) fn compile_for_validation(
     monomorphizer
         .process_queue()
         .map_err(monomorphization_error)?;
-    reject_code_from_tolerated_files(&context.file_manager, &monomorphizer, &tolerated_files)?;
-    let program = monomorphizer.into_program();
+    let output = monomorphizer.into_output();
+    reject_code_from_tolerated_files(
+        &context.file_manager,
+        &output.monomorphized_source_files,
+        &tolerated_files,
+    )?;
+    let program = output.program;
+
+    // The label travels beside the program; check it before interpreting rather than assuming the
+    // compilation honoured what was asked for.
+    assert_eq!(
+        output.field_id, field,
+        "ICE: asked for a {field} program and got a {} one",
+        output.field_id
+    );
 
     let abi = noirc_driver::gen_abi(
         &context,
@@ -131,21 +150,30 @@ pub(crate) fn compile_for_validation(
         BTreeMap::default(),
     );
 
-    Ok(Validated { program, abi })
+    Ok(Validated {
+        program,
+        abi,
+        field_id: output.field_id,
+    })
 }
 
 /// Return dependency files with tolerated diagnostics. Package diagnostics remain fatal, and
 /// callers must reject monomorphized code originating from a tolerated file.
-#[cfg_attr(not(feature = "goldilocks"), allow(unused_variables))]
+///
+/// The standard library's un-gated code is written for bn254 — its `modulus_num_bits() == 254`
+/// assertion and the constants of `std::field::bn254`, which no `#[field]` attribute drops — so a
+/// compilation for any other field reaches dependency errors that say nothing about the program
+/// under test. Gating that code is the standard library's own work; until it is done, those
+/// diagnostics are tolerated and the program is rejected only if it reaches the code behind them.
 fn tolerated_dependency_error_files(
     context: &Context,
     crate_id: CrateId,
     check_result: noirc_driver::CompilationResult<()>,
+    field: FieldId,
 ) -> Result<BTreeSet<FileId>, ValidationError> {
     match check_result {
         Ok(_) => Ok(BTreeSet::new()),
-        #[cfg(feature = "goldilocks")]
-        Err(diagnostics) => {
+        Err(diagnostics) if field != FieldId::Bn254 => {
             let package_files = context.crate_files(&crate_id);
             // Track dependency ICEs too; proceeding past an untracked ICE is unsound.
             let (package_errors, tolerated): (Vec<_>, Vec<_>) = diagnostics
@@ -160,7 +188,6 @@ fn tolerated_dependency_error_files(
             }
             Ok(tolerated.into_iter().map(|d| d.file).collect())
         }
-        #[cfg(not(feature = "goldilocks"))]
         Err(diagnostics) => Err(ValidationError::compile(
             diagnostic_summary(&diagnostics),
             format!("Noir compiler error: {diagnostics:?}"),
@@ -180,11 +207,10 @@ fn monomorphization_error(
 /// during elaboration remain outside this provenance check.
 fn reject_code_from_tolerated_files(
     file_manager: &FileManager,
-    monomorphizer: &Monomorphizer,
+    monomorphized_source_files: &BTreeSet<FileId>,
     tolerated: &BTreeSet<FileId>,
 ) -> Result<(), ValidationError> {
-    let mut poisoned: Vec<String> = monomorphizer
-        .monomorphized_source_files()
+    let mut poisoned: Vec<String> = monomorphized_source_files
         .intersection(tolerated)
         .map(|id| {
             file_manager

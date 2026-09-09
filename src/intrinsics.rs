@@ -346,11 +346,14 @@ fn arg_u64(args: &[Value], i: usize) -> Result<u64, InterpretError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acvm::FieldElement;
+    use acvm::{FieldId, FieldValue};
     use std::rc::Rc;
 
     fn field(n: u128) -> Value {
-        Value::Field(FieldElement::from(n))
+        Value::Field(
+            FieldValue::try_from_biguint(n.into(), FieldId::linked())
+                .expect("the test values are below every modulus"),
+        )
     }
     fn u32v(n: u32) -> Value {
         Value::Int(IntValue::canonical(false, 32, BigInt::from(n)))

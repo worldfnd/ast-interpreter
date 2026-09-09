@@ -6,7 +6,7 @@
 //! complement pattern; the parser has already refused any value whose pattern does not fit the
 //! field, so decoding that pattern is exact.
 
-use acvm::{AcirField, FieldElement};
+use acvm::{AcirField, FieldConfig, FieldId, FieldValue};
 
 use noirc_abi::{
     Abi, AbiType, MAIN_RETURN_NAME,
@@ -15,14 +15,19 @@ use noirc_abi::{
 use noirc_frontend::monomorphization::ast::{Program, Type};
 
 use super::error::InterpretError;
-use super::value::{IntValue, Value, field_to_bigint};
+use super::value::{IntValue, Value};
 
 /// Parse `toml_src` against `abi` and bind each value to `main`'s parameters in order.
+///
+/// `field` is the field the program was compiled under; an input the ABI parser accepted but that
+/// field cannot hold is refused here.
 pub fn inputs_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
+    field: FieldId,
 ) -> Result<Vec<Value>, InterpretError> {
+    let field_config = FieldConfig::new(field);
     // An unrepresentable recorded return must not prevent parsing the inputs.
     let parameters_only = Abi {
         return_type: None,
@@ -45,7 +50,7 @@ pub fn inputs_from_prover_toml(
         let input = map
             .get(name)
             .ok_or_else(|| InterpretError::Internal(format!("no parsed input for '{name}'")))?;
-        inputs.push(value_from_input(input, abi_type, typ)?);
+        inputs.push(value_from_input(input, abi_type, typ, field_config)?);
     }
     Ok(inputs)
 }
@@ -57,7 +62,9 @@ pub fn expected_return_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
+    field: FieldId,
 ) -> Result<Option<Value>, InterpretError> {
+    let field_config = FieldConfig::new(field);
     let map = Format::Toml
         .parse(toml_src, abi)
         .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
@@ -74,7 +81,12 @@ pub fn expected_return_from_prover_toml(
                 "Prover.toml parsed a return value but the ABI declares no return type".to_string(),
             )
         })?;
-    Ok(Some(value_from_input(input, abi_type, &main.return_type)?))
+    Ok(Some(value_from_input(
+        input,
+        abi_type,
+        &main.return_type,
+        field_config,
+    )?))
 }
 
 /// Map one ABI [`InputValue`] onto a monomorphized [`Type`], producing a [`Value`]. `abi_type`
@@ -84,12 +96,26 @@ pub(crate) fn value_from_input(
     input: &InputValue,
     abi_type: &AbiType,
     typ: &Type,
+    field_config: FieldConfig,
 ) -> Result<Value, InterpretError> {
     match (input, typ) {
-        (InputValue::Field(field), Type::Field) => Ok(Value::Field(*field)),
+        // The ABI parser reads values in the field the compiler is linked against; until it takes
+        // a field of its own, a `Field` input crosses into the interpreted field here and is
+        // refused when that field cannot hold it.
+        (InputValue::Field(field), Type::Field) => {
+            let value = FieldValue::from_linked_element(*field);
+            FieldValue::try_from_biguint(value.as_biguint().clone(), field_config.id())
+                .map(Value::Field)
+                .ok_or_else(|| {
+                    InterpretError::InvalidInput(format!(
+                        "Field input {value} is not a value of {}",
+                        field_config.name()
+                    ))
+                })
+        }
         (InputValue::Field(field), Type::Integer(signedness, bits)) => {
             let width = u32::from(bits.bit_size());
-            let raw = field_to_bigint(field);
+            let raw = FieldValue::from_linked_element(*field).to_bigint();
             // Guards values the parser never saw: the executor oracle decodes ACVM returns here.
             if raw.bits() > u64::from(width) {
                 return Err(InterpretError::InvalidInput(format!(
@@ -102,7 +128,7 @@ pub(crate) fn value_from_input(
                 raw,
             )))
         }
-        (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(*field != FieldElement::zero())),
+        (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(!field.is_zero())),
         (InputValue::Vec(elements), Type::Array(length, element_type)) => {
             let AbiType::Array {
                 length: abi_length,
@@ -126,7 +152,7 @@ pub(crate) fn value_from_input(
             }
             let values = elements
                 .iter()
-                .map(|element| value_from_input(element, element_abi, element_type))
+                .map(|element| value_from_input(element, element_abi, element_type, field_config))
                 .collect::<Result<_, _>>()?;
             Ok(Value::Array(values))
         }
@@ -155,7 +181,9 @@ pub(crate) fn value_from_input(
                 .iter()
                 .zip(types)
                 .zip(elements)
-                .map(|((field_abi, typ), element)| value_from_input(element, field_abi, typ))
+                .map(|((field_abi, typ), element)| {
+                    value_from_input(element, field_abi, typ, field_config)
+                })
                 .collect::<Result<_, _>>()?;
             Ok(Value::tuple(values))
         }
@@ -181,7 +209,7 @@ pub(crate) fn value_from_input(
                     let value = map.get(name).ok_or_else(|| {
                         InterpretError::Internal(format!("ABI struct has no field '{name}'"))
                     })?;
-                    value_from_input(value, field_abi, typ)
+                    value_from_input(value, field_abi, typ, field_config)
                 })
                 .collect::<Result<_, _>>()?;
             Ok(Value::tuple(values))

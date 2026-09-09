@@ -730,7 +730,11 @@ mod tests {
             )
             .unwrap();
             let project = crate::loader::NoirProject::new(root.path().to_path_buf()).unwrap();
-            let compiled = crate::validation_frontend::compile_for_validation(&project).unwrap();
+            let compiled = crate::validation_frontend::compile_for_validation(
+                &project,
+                acvm::FieldId::linked(),
+            )
+            .unwrap();
             projection_hash(&compiled.program)
         };
         assert_ne!(hash("a"), hash("b"));

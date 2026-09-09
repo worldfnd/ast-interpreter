@@ -4,7 +4,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use acvm::{AcirField, FieldElement};
+use acvm::{AcirField, FieldElement, FieldId};
 use fm::NormalizePath;
 use sha2::{Digest, Sha256};
 
@@ -430,7 +430,8 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
     };
 
     let validated = match run_step(|| {
-        compile_for_validation(&project).map_err(|e| (compile_error_of(&e), e.detail().to_string()))
+        compile_for_validation(&project, FieldId::linked())
+            .map_err(|e| (compile_error_of(&e), e.detail().to_string()))
     }) {
         Ok(validated) => {
             record.compile = StepOutcome::Passed;
@@ -455,11 +456,14 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
     let prover_src = std::fs::read_to_string(root.join("Prover.toml")).ok();
     let interpreted = run_step(|| {
         let inputs = match &prover_src {
-            Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
-                .map_err(|e| interpret_failure(&e))?,
+            Some(src) => {
+                inputs_from_prover_toml(&validated.program, &validated.abi, src, validated.field_id)
+                    .map_err(|e| interpret_failure(&e))?
+            }
             None => Vec::new(),
         };
-        interpret_with_inputs(&validated.program, inputs).map_err(|e| interpret_failure(&e))
+        interpret_with_inputs(&validated.program, inputs, validated.field_id)
+            .map_err(|e| interpret_failure(&e))
     });
     match interpreted {
         Ok(value) => {
@@ -481,8 +485,13 @@ fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) 
         return StepOutcome::not_run("no Prover.toml");
     };
     let recorded = run_step(|| {
-        expected_return_from_prover_toml(&validated.program, &validated.abi, src)
-            .map_err(|e| interpret_failure(&e))
+        expected_return_from_prover_toml(
+            &validated.program,
+            &validated.abi,
+            src,
+            validated.field_id,
+        )
+        .map_err(|e| interpret_failure(&e))
     });
     match recorded {
         Err(StepOutcome::Failed { error, .. })
@@ -738,7 +747,12 @@ mod tests {
             Some(&FailureKind::OracleMismatch)
         );
 
-        let field = |v: u64| Value::Field(FieldElement::from(v as u128));
+        let field = |v: u64| {
+            Value::Field(
+                acvm::FieldValue::try_from_biguint(u128::from(v).into(), FieldId::linked())
+                    .expect("the test values are below every modulus"),
+            )
+        };
         let differing = compare_with_recorded(&field(1), &field(2));
         if cfg!(feature = "goldilocks") {
             assert!(differing.passed(), "{differing:?}");

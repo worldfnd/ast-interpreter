@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use acvm::{AcirField, FieldElement};
-use num_bigint::{BigInt, Sign};
+use acvm::{FieldConfig, FieldValue};
+use num_bigint::BigInt;
 use num_traits::Zero;
 
 use noirc_errors::Location;
@@ -347,7 +347,7 @@ impl<'p> Interpreter<'p> {
             Literal::Integer(value, typ, _) => match typ {
                 // A Field literal's `BigInt` is the signed representative; `bigint_to_field` reduces
                 // it into the compiled-in field (a negative value maps to `modulus - |value|`).
-                Type::Field => Value::Field(bigint_to_field(value)),
+                Type::Field => Value::Field(bigint_to_field(value, self.field)?),
                 Type::Integer(signedness, bits) => {
                     let signed = signedness.is_signed();
                     // `canonical` wraps the mathematical value into the type's range (identity for a
@@ -433,7 +433,7 @@ impl<'p> Interpreter<'p> {
                 Value::Int(int) => Ok(Value::Int(IntValue::checked(
                     int.signed, int.bits, -int.value, "negation",
                 )?)),
-                Value::Field(field) => Ok(Value::Field(FieldElement::zero() - field)),
+                Value::Field(field) => Ok(Value::Field(-field)),
                 other => Err(InterpretError::Type(format!("cannot negate {other:?}"))),
             },
             UnaryOp::Not => match rhs {
@@ -472,12 +472,10 @@ impl<'p> Interpreter<'p> {
                 Add => Ok(Value::Field(a + b)),
                 Subtract => Ok(Value::Field(a - b)),
                 Multiply => Ok(Value::Field(a * b)),
-                Divide => {
-                    if b == FieldElement::zero() {
-                        return Err(InterpretError::DivisionByZero);
-                    }
-                    Ok(Value::Field(a * b.inverse()))
-                }
+                Divide => a
+                    .checked_div(&b)
+                    .map(Value::Field)
+                    .ok_or(InterpretError::DivisionByZero),
                 Equal => Ok(Value::Bool(a == b)),
                 NotEqual => Ok(Value::Bool(a != b)),
                 _ => Err(InterpretError::Type(
@@ -519,16 +517,20 @@ impl<'p> Interpreter<'p> {
                     "cast of a signed integer to Field (rejected by Noir's type checker)"
                         .to_string(),
                 )),
-                Value::Int(int) => int.try_to_field().map(Value::Field).ok_or_else(|| {
-                    InterpretError::Type(format!(
-                        "cast of a u{} to Field (rejected by Noir's type checker)",
-                        int.bits
-                    ))
-                }),
+                Value::Int(int) => {
+                    int.try_to_field(self.field)
+                        .map(Value::Field)
+                        .ok_or_else(|| {
+                            InterpretError::Type(format!(
+                                "cast of a u{} to Field (rejected by Noir's type checker)",
+                                int.bits
+                            ))
+                        })
+                }
                 Value::Bool(b) => Ok(Value::Field(if b {
-                    FieldElement::one()
+                    FieldValue::one(self.field.id())
                 } else {
-                    FieldElement::zero()
+                    FieldValue::zero(self.field.id())
                 })),
                 Value::Field(f) => Ok(Value::Field(f)),
                 other => Err(InterpretError::Type(format!(
@@ -1126,7 +1128,9 @@ fn case_matches(constructor: &Constructor, scrutinee: &Value) -> Result<bool, In
         Constructor::False => Ok(!scrutinee.as_bool()?),
         // Matching on a `Field` is legal (e.g. `match x { 1 => .. }`), so compare its value.
         Constructor::Int(want) => match scrutinee {
-            Value::Field(f) => Ok(f == &bigint_to_field(want)),
+            // The wanted literal is read in the scrutinee's own field; one it cannot hold
+            // matches nothing.
+            Value::Field(f) => Ok(FieldValue::try_from_bigint(want, f.field()).as_ref() == Some(f)),
             _ => Ok(&scrutinee.as_int()?.value == want),
         },
         Constructor::Variant(_, index) => {
@@ -1307,11 +1311,18 @@ fn int_type(typ: &Type) -> Option<(bool, u32)> {
     }
 }
 
-/// Reduce a signed literal into the field; negative values map to `modulus - |value|`.
-fn bigint_to_field(value: &BigInt) -> FieldElement {
-    let (sign, magnitude) = value.to_bytes_be();
-    let field = FieldElement::from_be_bytes_reduce(&magnitude);
-    if sign == Sign::Minus { -field } else { field }
+/// The field value a signed literal names; a negative value is the negation of its magnitude.
+///
+/// A magnitude the field cannot hold is refused rather than reduced, matching the compiler
+/// (`FieldValue::try_from_bigint`); the type checker has already rejected such a literal, so
+/// reaching this error means the AST and the field label disagree.
+fn bigint_to_field(value: &BigInt, field: FieldConfig) -> Result<FieldValue, InterpretError> {
+    FieldValue::try_from_bigint(value, field.id()).ok_or_else(|| {
+        InterpretError::Type(format!(
+            "Field literal {value} is not canonical in {}",
+            field.name()
+        ))
+    })
 }
 
 /// Integer semantics covered here:
@@ -1538,7 +1549,7 @@ mod aggregate_and_fmt_tests {
     #[test]
     fn primitive_binary_on_aggregate_is_an_internal_error() {
         let program = Program::default();
-        let interpreter = Interpreter::new(&program);
+        let interpreter = Interpreter::new(&program, acvm::FieldId::linked());
 
         assert!(matches!(
             interpreter.eval_binary(
@@ -1602,7 +1613,7 @@ mod aggregate_and_fmt_tests {
         env.insert(index_local, Value::Ref(index.clone(), true));
 
         let program = Program::default();
-        let mut interpreter = Interpreter::new(&program);
+        let mut interpreter = Interpreter::new(&program, acvm::FieldId::linked());
         assert_eq!(
             interpreter.lvalue_value(&target, &mut env).unwrap(),
             u32v(1)
