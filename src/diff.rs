@@ -9,7 +9,7 @@ use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
 use super::error::InterpretError;
-use super::value::{Value, field_to_bigint};
+use super::value::Value;
 
 /// Bump whenever the dump shape changes (`RunRecord`, `DiffValue`, `DumpProvenance`), so a stale
 /// dump is rejected rather than silently misread.
@@ -36,7 +36,7 @@ pub enum DiffValue {
 impl DiffValue {
     pub fn from_value(value: &Value) -> DiffValue {
         match value {
-            Value::Field(field) => DiffValue::Field(field_to_bigint(field).to_string()),
+            Value::Field(field) => DiffValue::Field(field.to_bigint().to_string()),
             Value::Int(int) => DiffValue::Int {
                 signed: int.signed,
                 bits: int.bits,

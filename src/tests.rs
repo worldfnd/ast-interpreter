@@ -1,17 +1,19 @@
+use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use super::corpus::{compile_error_of, copy_dir, corpus_dir, list_programs, panic_message};
+use super::corpus::{
+    compile_error_of, copy_dir, corpus_dir, list_programs, panic_message, temp_noir_package,
+};
 use super::diff::{FailureKind, comparable_error_of};
-#[cfg(not(feature = "goldilocks"))]
 use super::expected_return_from_prover_toml;
 use super::loader::NoirProject;
-use super::validation_frontend::compile_for_validation;
+use super::validation_frontend::{Validated, compile_for_validation};
 use super::{
     IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
 };
-#[cfg(not(feature = "goldilocks"))]
-use acvm::FieldElement;
+use acvm::{FieldConfig, FieldId, FieldValue};
 use num_bigint::BigInt;
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
@@ -30,15 +32,164 @@ fn negative_fixture(name: &str) -> PathBuf {
 /// Compile a fixture through Noir's frontend + monomorphizer and interpret the resulting AST.
 fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let project = NoirProject::new(fixture(name))?;
-    let validated = compile_for_validation(&project)?;
-    Ok(interpret(&validated.program)?)
+    let validated = compile_for_validation(&project, FieldId::linked())?;
+    Ok(interpret(&validated.program, validated.field_id)?)
 }
 
-/// The basic fixture checks arithmetic, control flow and casts under both fields.
+fn compile_source(source: &str, field: FieldId) -> Validated {
+    let root = temp_noir_package("test", source);
+    let project = NoirProject::new(root.path().to_path_buf()).expect("project");
+    compile_for_validation(&project, field).expect("frontend compile")
+}
+
 #[test]
-fn interprets_basic_corpus_program() {
-    let result = interpret_fixture("interp_basic").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
+fn one_build_interprets_a_program_under_two_fields() {
+    let project = NoirProject::new(fixture("interp_basic")).expect("project");
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_for_validation(&project, field)
+            .unwrap_or_else(|error| panic!("{field}: frontend compile: {error:?}"));
+        assert_eq!(
+            validated.field_id, field,
+            "the output carries the field asked for"
+        );
+        let result = interpret(&validated.program, validated.field_id)
+            .unwrap_or_else(|error| panic!("{field}: interpret: {error:?}"));
+        assert_eq!(result, Value::Unit, "{field}: main returns unit");
+
+        let validated = compile_source("fn main(x: Field) -> pub Field { x - 2 }", field);
+        let result = interpret_with_inputs(
+            &validated.program,
+            vec![Value::Field(FieldValue::one(field))],
+            validated.field_id,
+        )
+        .expect("field arithmetic");
+        let Value::Field(result) = result else {
+            panic!("expected a Field return")
+        };
+        assert_eq!(result.field(), field);
+        assert_eq!(
+            result.as_biguint(),
+            &(FieldConfig::new(field).modulus() - 1u8)
+        );
+    }
+}
+
+#[test]
+fn toml_bridge_requires_the_linked_field() {
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
+        for (toml, expected) in [
+            ("x = -1\nreturn = -1", -FieldValue::one(field)),
+            ("x = 1\nreturn = 1", FieldValue::one(field)),
+        ] {
+            let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, toml, field);
+            let recorded =
+                expected_return_from_prover_toml(&validated.program, &validated.abi, toml, field);
+            if field == FieldId::linked() {
+                assert_eq!(inputs.unwrap(), vec![Value::Field(expected.clone())]);
+                assert_eq!(recorded.unwrap(), Some(Value::Field(expected)));
+            } else {
+                assert!(
+                    matches!(inputs, Err(InterpretError::InvalidInput(_))),
+                    "{field}: {inputs:?}"
+                );
+                assert!(
+                    matches!(recorded, Err(InterpretError::InvalidInput(_))),
+                    "{field}: {recorded:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rejects_inputs_from_another_field() {
+    let field = FieldId::linked();
+    let other = if field == FieldId::Bn254 {
+        FieldId::Goldilocks
+    } else {
+        FieldId::Bn254
+    };
+    let good = Value::Field(FieldValue::one(field));
+    let bad = Value::Field(FieldValue::one(other));
+    let cell = |value: &Value| Rc::new(RefCell::new(value.clone()));
+    for (source, good_input, bad_input) in [
+        (
+            "fn main(x: Field) -> pub Field { x }",
+            good.clone(),
+            bad.clone(),
+        ),
+        (
+            "fn main(x: ([Field; 1], Field)) -> pub Field { x.1 }",
+            Value::tuple(vec![Value::Array(vec![good.clone()]), good.clone()]),
+            Value::tuple(vec![Value::Array(vec![bad.clone()]), good.clone()]),
+        ),
+    ] {
+        let validated = compile_source(source, field);
+        assert_eq!(
+            interpret_with_inputs(&validated.program, vec![good_input], field).unwrap(),
+            good
+        );
+        let result = interpret_with_inputs(&validated.program, vec![bad_input], field);
+        assert!(
+            matches!(result, Err(InterpretError::InvalidInput(_))),
+            "{result:?}"
+        );
+    }
+
+    // Noir refuses a reference as an entry-point type, so a `Ref` input is always a caller error
+    // and has no accepted spelling to check; the traversal still has to look inside one rather
+    // than take it for a leaf.
+    let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
+    for hidden in [
+        Value::Ref(cell(&bad), false),
+        Value::Array(vec![Value::Ref(cell(&bad), false)]),
+        Value::tuple(vec![Value::Ref(cell(&bad), true)]),
+    ] {
+        match interpret_with_inputs(&validated.program, vec![hidden.clone()], field) {
+            Err(InterpretError::InvalidInput(message)) => {
+                assert!(
+                    message.contains(&format!("belongs to {other}")),
+                    "{message}"
+                )
+            }
+            result => panic!("{hidden:?}: {result:?}"),
+        }
+    }
+}
+
+/// `IntValue`'s members are public, so an input can name a value its own type does not hold.
+#[test]
+fn rejects_an_integer_input_outside_its_type() {
+    let field = FieldId::linked();
+    let int = |signed, bits, value: i64| IntValue {
+        signed,
+        bits,
+        value: BigInt::from(value),
+    };
+    let validated = compile_source("fn main(x: [u8; 1], y: i8) -> pub u8 { x[0] }", field);
+    let run = |x: IntValue, y: IntValue| {
+        let inputs = vec![Value::Array(vec![Value::Int(x)]), Value::Int(y)];
+        interpret_with_inputs(&validated.program, inputs, field)
+    };
+    let (u8_max, i8_min) = (int(false, 8, 255), int(true, 8, -128));
+    assert_eq!(
+        run(u8_max.clone(), i8_min.clone()).unwrap(),
+        Value::Int(int(false, 8, 255))
+    );
+    for (x, y) in [
+        (int(false, 8, 256), i8_min.clone()),
+        (int(false, 8, -1), i8_min.clone()),
+        (int(false, 0, 0), i8_min.clone()),
+        (u8_max.clone(), int(true, 8, 128)),
+        (u8_max.clone(), int(true, 8, -129)),
+    ] {
+        let result = run(x.clone(), y.clone());
+        assert!(
+            matches!(result, Err(InterpretError::InvalidInput(_))),
+            "{x:?}, {y:?}: {result:?}"
+        );
+    }
 }
 
 /// Integer-to-integer casts keep a `u64` above the Goldilocks modulus intact, at run time and in
@@ -55,8 +206,8 @@ fn interprets_casts_above_the_modulus() {
 #[test]
 fn detects_false_assertion() {
     let project = NoirProject::new(negative_fixture("assert_fail")).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend compile");
-    match interpret(&validated.program) {
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend compile");
+    match interpret(&validated.program, validated.field_id) {
         Err(InterpretError::AssertionFailed { .. }) => {}
         other => panic!("expected AssertionFailed, got {other:?}"),
     }
@@ -69,7 +220,7 @@ fn detects_false_assertion() {
 fn rejects_reachable_type_error() {
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         let project = NoirProject::new(negative_fixture("reachable_error")).expect("project");
-        compile_for_validation(&project).map(|_| ())
+        compile_for_validation(&project, FieldId::linked()).map(|_| ())
     }));
     match outcome {
         Ok(Err(_)) => {} // rejected cleanly — desired
@@ -86,7 +237,7 @@ fn rejects_reachable_type_error() {
 #[test]
 fn rejects_reached_dependency_error() {
     let project = NoirProject::new(fixture("interp_reached_dep_error")).expect("project");
-    let err = match compile_for_validation(&project) {
+    let err = match compile_for_validation(&project, FieldId::linked()) {
         Ok(_) => panic!(
             "a program reaching code from a tolerated-error file must be rejected, not validated"
         ),
@@ -103,13 +254,15 @@ fn rejects_reached_dependency_error() {
 #[test]
 fn interprets_reached_dep_fixture_on_bn254() {
     let project = NoirProject::new(fixture("interp_reached_dep_error")).expect("project");
-    let validated = compile_for_validation(&project).expect("clean compile under bn254");
+    let validated =
+        compile_for_validation(&project, FieldId::linked()).expect("clean compile under bn254");
     let x = Value::Int(IntValue {
         signed: false,
         bits: 32,
         value: BigInt::from(3u32),
     });
-    let result = interpret_with_inputs(&validated.program, vec![x]).expect("interpret");
+    let result =
+        interpret_with_inputs(&validated.program, vec![x], validated.field_id).expect("interpret");
     let expected = Value::Int(IntValue {
         signed: false,
         bits: 32,
@@ -123,16 +276,22 @@ fn interprets_reached_dep_fixture_on_bn254() {
 fn interprets_fixture_inputs_from_prover_toml() {
     let root = fixture("interp_inputs_u64");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
 
     assert!(matches!(
-        interpret_with_inputs(&validated.program, Vec::new()),
+        interpret_with_inputs(&validated.program, Vec::new(), validated.field_id),
         Err(InterpretError::InvalidInput(_))
     ));
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
     let expected = Value::Int(IntValue {
         signed: false,
         bits: 64,
@@ -147,11 +306,17 @@ fn interprets_fixture_inputs_from_prover_toml() {
 fn interprets_signed_i32_input() {
     let root = fixture("interp_inputs_i32");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
     assert_eq!(
         result,
         Value::Int(IntValue {
@@ -168,11 +333,17 @@ fn interprets_signed_i32_input() {
 fn bn254_decodes_signed_i64_input() {
     let root = fixture("neg_interp_inputs_i64");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
     assert_eq!(
         result,
         Value::Int(IntValue {
@@ -188,7 +359,7 @@ fn bn254_decodes_signed_i64_input() {
 #[test]
 fn goldilocks_rejects_u64_to_field_cast() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
-    let err = match compile_for_validation(&project) {
+    let err = match compile_for_validation(&project, FieldId::linked()) {
         Ok(_) => panic!("u64 as Field must not compile under Goldilocks"),
         Err(e) => e,
     };
@@ -200,15 +371,21 @@ fn goldilocks_rejects_u64_to_field_cast() {
 #[test]
 fn bn254_casts_u64_to_field_exactly() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = format!("x = \"{}\"", u64::MAX);
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Field(FieldElement::from(u128::from(u64::MAX)))
-    );
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
+    let expected =
+        acvm::FieldValue::try_from_biguint(u128::from(u64::MAX).into(), validated.field_id)
+            .expect("u64::MAX is below the bn254 modulus");
+    assert_eq!(result, Value::Field(expected));
 }
 
 /// `-2^32` has the pattern `p - 1`; `-1` has the pattern `2^64 - 1`, which exceeds the modulus.
@@ -217,10 +394,12 @@ fn bn254_casts_u64_to_field_exactly() {
 fn goldilocks_validates_i64_input_patterns() {
     let root = fixture("neg_interp_inputs_i64");
     let project = NoirProject::new(root).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let run = |toml: &str| {
-        inputs_from_prover_toml(&validated.program, &validated.abi, toml)
-            .and_then(|inputs| interpret_with_inputs(&validated.program, inputs))
+        inputs_from_prover_toml(&validated.program, &validated.abi, toml, validated.field_id)
+            .and_then(|inputs| {
+                interpret_with_inputs(&validated.program, inputs, validated.field_id)
+            })
     };
     let expected = |v: i64| {
         Value::Int(IntValue {
@@ -247,11 +426,17 @@ fn goldilocks_validates_i64_input_patterns() {
 fn interprets_struct_input_by_declaration_order() {
     let root = fixture("interp_inputs_struct");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
     assert_eq!(
         result,
         Value::Int(IntValue {
@@ -268,11 +453,17 @@ fn interprets_struct_input_by_declaration_order() {
 fn interprets_mixed_inputs() {
     let root = fixture("interp_inputs_mixed");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
     assert_eq!(
         result,
         Value::Int(IntValue {
@@ -288,11 +479,17 @@ fn interprets_mixed_inputs() {
 fn interprets_reference_call_chain() {
     let root = fixture("interp_refs_call_chain");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
     assert_eq!(
         result,
         Value::Int(IntValue {
@@ -308,11 +505,17 @@ fn interprets_reference_call_chain() {
 fn interprets_enum_match() {
     let root = fixture("interp_match_enum");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs =
-        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
-    let result = interpret_with_inputs(&validated.program, inputs).expect("interpret");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .expect("inputs");
+    let result =
+        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
     assert_eq!(
         result,
         Value::Int(IntValue {
@@ -329,7 +532,7 @@ fn interprets_enum_match() {
 fn interprets_integer_match() {
     let validated = {
         let project = NoirProject::new(fixture("interp_match_int")).expect("project");
-        compile_for_validation(&project).expect("frontend")
+        compile_for_validation(&project, FieldId::linked()).expect("frontend")
     };
     let run = |x: i32| {
         let input = Value::Int(IntValue {
@@ -337,7 +540,8 @@ fn interprets_integer_match() {
             bits: 32,
             value: BigInt::from(x),
         });
-        interpret_with_inputs(&validated.program, vec![input]).expect("interpret")
+        interpret_with_inputs(&validated.program, vec![input], validated.field_id)
+            .expect("interpret")
     };
     let i32v = |v: i32| {
         Value::Int(IntValue {
@@ -355,8 +559,8 @@ fn interprets_integer_match() {
 #[test]
 fn renders_assert_message() {
     let project = NoirProject::new(negative_fixture("assert_fmt_msg")).expect("project");
-    let validated = compile_for_validation(&project).expect("frontend compile");
-    match interpret(&validated.program) {
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend compile");
+    match interpret(&validated.program, validated.field_id) {
         Err(InterpretError::AssertionFailed {
             message: Some(m), ..
         }) => assert_eq!(
@@ -382,11 +586,17 @@ fn interprets_program_with_inputs() {
     copy_dir(&program_dir, &root);
 
     let project = NoirProject::new(root.clone()).unwrap();
-    let validated = compile_for_validation(&project).unwrap();
+    let validated = compile_for_validation(&project, FieldId::linked()).unwrap();
     let toml = std::fs::read_to_string(root.join("Prover.toml")).unwrap();
-    let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, &toml).unwrap();
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .unwrap();
 
-    let result = interpret_with_inputs(&validated.program, inputs).unwrap();
+    let result = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
     assert_eq!(result, Value::Unit);
 }
 
@@ -407,14 +617,25 @@ fn interpreter_return_matches_recorded_expected() {
     copy_dir(&program_dir, &root);
 
     let project = NoirProject::new(root.clone()).unwrap();
-    let validated = compile_for_validation(&project).unwrap();
+    let validated = compile_for_validation(&project, FieldId::linked()).unwrap();
     let toml = std::fs::read_to_string(root.join("Prover.toml")).unwrap();
 
-    let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, &toml).unwrap();
-    let value = interpret_with_inputs(&validated.program, inputs).unwrap();
-    let expected = expected_return_from_prover_toml(&validated.program, &validated.abi, &toml)
-        .unwrap()
-        .expect("this program records a return value");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .unwrap();
+    let value = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
+    let expected = expected_return_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .unwrap()
+    .expect("this program records a return value");
 
     assert_eq!(
         value, expected,
@@ -428,7 +649,7 @@ fn interpreter_return_matches_recorded_expected() {
 #[test]
 fn validates_goldilocks_mono_ast_u64() {
     let project = NoirProject::new(fixture("interp_inputs_u64")).expect("project");
-    let validated = compile_for_validation(&project)
+    let validated = compile_for_validation(&project, FieldId::linked())
         .expect("goldilocks frontend should produce a mono-AST for a stdlib-free u64 program");
 
     // main(x: u64) -> u64 = x * 2 + (p + 1). With x = 3: 6 + 18446744069414584322.
@@ -437,7 +658,8 @@ fn validates_goldilocks_mono_ast_u64() {
         bits: 64,
         value: BigInt::from(3u64),
     });
-    let result = interpret_with_inputs(&validated.program, vec![x]).expect("interpret");
+    let result =
+        interpret_with_inputs(&validated.program, vec![x], validated.field_id).expect("interpret");
     let expected = Value::Int(IntValue {
         signed: false,
         bits: 64,
@@ -485,14 +707,16 @@ fn oracle_compare(program_dir: &Path) -> String {
     // Interp side: frontend-compile + interpret, both caught; keep `validated` to decode the
     // executor's return when both succeed.
     let interp = panic::catch_unwind(AssertUnwindSafe(|| {
-        let validated = compile_for_validation(&project)
+        let validated = compile_for_validation(&project, FieldId::linked())
             .map_err(|e| (compile_error_of(&e).kind, e.to_string()))?;
         let inputs = match &prover_src {
-            Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
-                .map_err(|e| (comparable_error_of(&e).kind, e.to_string()))?,
+            Some(src) => {
+                inputs_from_prover_toml(&validated.program, &validated.abi, src, validated.field_id)
+                    .map_err(|e| (comparable_error_of(&e).kind, e.to_string()))?
+            }
             None => Vec::new(),
         };
-        let value = interpret_with_inputs(&validated.program, inputs)
+        let value = interpret_with_inputs(&validated.program, inputs, validated.field_id)
             .map_err(|e| (comparable_error_of(&e).kind, e.to_string()))?;
         Ok::<_, (FailureKind, String)>((validated, value))
     }));
@@ -539,9 +763,14 @@ fn oracle_compare(program_dir: &Path) -> String {
             // interpreter that matches ground truth while the executor doesn't is an oracle
             // limitation, bucketed apart so it doesn't fail the gate.
             let recorded = prover_src.as_deref().and_then(|src| {
-                super::expected_return_from_prover_toml(&validated.program, &validated.abi, src)
-                    .ok()
-                    .flatten()
+                super::expected_return_from_prover_toml(
+                    &validated.program,
+                    &validated.abi,
+                    src,
+                    validated.field_id,
+                )
+                .ok()
+                .flatten()
             });
             match recorded {
                 Some(gt) if interp_value == gt && oracle_value != gt => {
@@ -646,6 +875,7 @@ mod mavros_oracle {
         NoirProject, Value, compile_for_validation, fixture, inputs_from_prover_toml, interpret,
         interpret_with_inputs,
     };
+    use acvm::FieldId;
     use mavros_compiler::{driver::Driver, project::Project};
 
     /// The integration driver and the pure-Noir frontend should agree on a stdlib-free fixture.
@@ -656,21 +886,30 @@ mod mavros_oracle {
 
         // pure-Noir side
         let noir = NoirProject::new(root.clone()).expect("noir project");
-        let validated = compile_for_validation(&noir).expect("pure-noir frontend");
-        let noir_inputs = inputs_from_prover_toml(&validated.program, &validated.abi, &toml)
-            .expect("noir inputs");
+        let validated =
+            compile_for_validation(&noir, FieldId::linked()).expect("pure-noir frontend");
+        let noir_inputs = inputs_from_prover_toml(
+            &validated.program,
+            &validated.abi,
+            &toml,
+            validated.field_id,
+        )
+        .expect("noir inputs");
         let noir_result =
-            interpret_with_inputs(&validated.program, noir_inputs).expect("noir interpret");
+            interpret_with_inputs(&validated.program, noir_inputs, validated.field_id)
+                .expect("noir interpret");
 
         // Integration side.
         let project = Project::new(root.clone()).expect("oracle project");
         let mut driver = Driver::new(project, false);
         driver.run_noir_compiler().expect("oracle compile");
         let oracle_program = driver.monomorphized_program();
+        // The driver compiles for the field it is linked against.
         let oracle_inputs =
-            inputs_from_prover_toml(oracle_program, driver.abi(), &toml).expect("oracle inputs");
-        let oracle_result =
-            interpret_with_inputs(oracle_program, oracle_inputs).expect("oracle interpret");
+            inputs_from_prover_toml(oracle_program, driver.abi(), &toml, FieldId::linked())
+                .expect("oracle inputs");
+        let oracle_result = interpret_with_inputs(oracle_program, oracle_inputs, FieldId::linked())
+            .expect("oracle interpret");
 
         assert_eq!(
             noir_result, oracle_result,
@@ -682,8 +921,9 @@ mod mavros_oracle {
     #[test]
     fn compile_for_validation_accepts_oracle_project() {
         let project = Project::new(fixture("interp_basic")).expect("oracle project");
-        let validated = compile_for_validation(&project).expect("validate oracle project");
-        let result = interpret(&validated.program).expect("interpret");
+        let validated =
+            compile_for_validation(&project, FieldId::linked()).expect("validate oracle project");
+        let result = interpret(&validated.program, validated.field_id).expect("interpret");
         assert_eq!(result, Value::Unit);
     }
 }

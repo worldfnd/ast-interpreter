@@ -714,23 +714,19 @@ mod tests {
     #[test]
     fn assertion_payload_field_names_change_the_projection() {
         let hash = |field| {
-            let root = tempfile::tempdir().unwrap();
-            std::fs::create_dir(root.path().join("src")).unwrap();
-            std::fs::write(
-                root.path().join("Nargo.toml"),
-                "[package]\nname = \"projection\"\ntype = \"bin\"\nauthors = []\n",
-            )
-            .unwrap();
-            std::fs::write(
-                root.path().join("src/main.nr"),
-                format!(
+            let root = crate::corpus::temp_noir_package(
+                "projection",
+                &format!(
                     "struct Foo {{ {field}: u32 }}\n\
                      fn main(foo: Foo, x: u32) {{ assert(x == 1, f\"{{foo}}\"); }}"
                 ),
+            );
+            let project = crate::loader::NoirProject::new(root.path().to_path_buf()).unwrap();
+            let compiled = crate::validation_frontend::compile_for_validation(
+                &project,
+                acvm::FieldId::linked(),
             )
             .unwrap();
-            let project = crate::loader::NoirProject::new(root.path().to_path_buf()).unwrap();
-            let compiled = crate::validation_frontend::compile_for_validation(&project).unwrap();
             projection_hash(&compiled.program)
         };
         assert_ne!(hash("a"), hash("b"));

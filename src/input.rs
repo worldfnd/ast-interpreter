@@ -6,7 +6,10 @@
 //! complement pattern; the parser has already refused any value whose pattern does not fit the
 //! field, so decoding that pattern is exact.
 
-use acvm::{AcirField, FieldElement};
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use acvm::{AcirField, FieldId, FieldValue};
 
 use noirc_abi::{
     Abi, AbiType, MAIN_RETURN_NAME,
@@ -15,14 +18,20 @@ use noirc_abi::{
 use noirc_frontend::monomorphization::ast::{Program, Type};
 
 use super::error::InterpretError;
-use super::value::{IntValue, Value, field_to_bigint};
+use super::value::{IntValue, Value};
 
 /// Parse `toml_src` against `abi` and bind each value to `main`'s parameters in order.
+///
+/// `field` must match both the compiled program and [`FieldId::linked`]. The ABI parser resolves
+/// native `-1` and quoted `p - 1` to the same linked-field element, losing the spelling needed to
+/// interpret them in another field. Cross-field parsing is rejected until the codec supports it.
 pub fn inputs_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
+    field: FieldId,
 ) -> Result<Vec<Value>, InterpretError> {
+    require_linked_field(field)?;
     // An unrepresentable recorded return must not prevent parsing the inputs.
     let parameters_only = Abi {
         return_type: None,
@@ -53,11 +62,14 @@ pub fn inputs_from_prover_toml(
 /// Decode the expected `main` return value recorded in `Prover.toml` (the `return = ...` field), if
 /// present. Noir's test corpus records this as the program's known-correct output, so it is a
 /// ground-truth reference the interpreter's result can be checked against.
+/// Requires the linked field, as [`inputs_from_prover_toml`] does.
 pub fn expected_return_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
+    field: FieldId,
 ) -> Result<Option<Value>, InterpretError> {
+    require_linked_field(field)?;
     let map = Format::Toml
         .parse(toml_src, abi)
         .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
@@ -77,6 +89,78 @@ pub fn expected_return_from_prover_toml(
     Ok(Some(value_from_input(input, abi_type, &main.return_type)?))
 }
 
+fn require_linked_field(field: FieldId) -> Result<(), InterpretError> {
+    if field != FieldId::linked() {
+        return Err(InterpretError::InvalidInput(format!(
+            "Prover.toml parsing for {field} requires a build linked against it; this build uses {}",
+            FieldId::linked()
+        )));
+    }
+    Ok(())
+}
+
+/// Check the invariants the interpreter relies on but cannot restore from a caller-built [`Value`]:
+/// every `Field` belongs to `field`, and every integer is canonical for its own type. [`IntValue`]'s
+/// members are public, so an input can be spelled outside the range its width and signedness name.
+pub(crate) fn validate_inputs(inputs: &[Value], field: FieldId) -> Result<(), InterpretError> {
+    fn check(
+        value: &Value,
+        field: FieldId,
+        seen: &mut HashSet<*const std::cell::RefCell<Value>>,
+    ) -> Result<(), InterpretError> {
+        let cells = match value {
+            Value::Field(value) if value.field() != field => {
+                return Err(InterpretError::InvalidInput(format!(
+                    "Field input belongs to {}, but the program uses {field}",
+                    value.field()
+                )));
+            }
+            Value::Int(int) => return check_int(int),
+            Value::Array(values) => {
+                return values
+                    .iter()
+                    .try_for_each(|value| check(value, field, seen));
+            }
+            Value::Tuple(cells) => cells.as_slice(),
+            Value::Ref(cell, _) => std::slice::from_ref(cell),
+            _ => return Ok(()),
+        };
+        for cell in cells {
+            // Shared or cyclic references need only one visit per cell.
+            if seen.insert(Rc::as_ptr(cell)) {
+                let value = cell.try_borrow().map_err(|_| {
+                    InterpretError::InvalidInput("input cell is mutably borrowed".to_string())
+                })?;
+                check(&value, field, seen)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut seen = HashSet::new();
+    inputs
+        .iter()
+        .try_for_each(|input| check(input, field, &mut seen))
+}
+
+fn check_int(int: &IntValue) -> Result<(), InterpretError> {
+    let sign = if int.signed { 'i' } else { 'u' };
+    // A zero-width type holds no values at all, and `range` would underflow computing `bits - 1`.
+    if int.bits == 0 {
+        return Err(InterpretError::InvalidInput(format!(
+            "integer input declares the empty type {sign}0"
+        )));
+    }
+    let (min, max) = IntValue::range(int.signed, int.bits);
+    if int.value < min || int.value > max {
+        return Err(InterpretError::InvalidInput(format!(
+            "integer input {} is not a value of {sign}{}",
+            int.value, int.bits
+        )));
+    }
+    Ok(())
+}
+
 /// Map one ABI [`InputValue`] onto a monomorphized [`Type`], producing a [`Value`]. `abi_type`
 /// supplies the struct field ordering that the lowered `Type::Tuple` drops. Reused by the executor
 /// oracle to decode Noir's ACVM return into a comparable `Value`.
@@ -86,10 +170,12 @@ pub(crate) fn value_from_input(
     typ: &Type,
 ) -> Result<Value, InterpretError> {
     match (input, typ) {
-        (InputValue::Field(field), Type::Field) => Ok(Value::Field(*field)),
+        (InputValue::Field(field), Type::Field) => {
+            Ok(Value::Field(FieldValue::from_linked_element(*field)))
+        }
         (InputValue::Field(field), Type::Integer(signedness, bits)) => {
             let width = u32::from(bits.bit_size());
-            let raw = field_to_bigint(field);
+            let raw = FieldValue::from_linked_element(*field).to_bigint();
             // Guards values the parser never saw: the executor oracle decodes ACVM returns here.
             if raw.bits() > u64::from(width) {
                 return Err(InterpretError::InvalidInput(format!(
@@ -102,7 +188,7 @@ pub(crate) fn value_from_input(
                 raw,
             )))
         }
-        (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(*field != FieldElement::zero())),
+        (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(!field.is_zero())),
         (InputValue::Vec(elements), Type::Array(length, element_type)) => {
             let AbiType::Array {
                 length: abi_length,

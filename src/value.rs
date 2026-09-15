@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use acvm::{AcirField, FieldElement};
+use acvm::{FieldConfig, FieldValue};
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Zero};
 
@@ -14,10 +14,11 @@ use super::error::InterpretError;
 /// Integers carry an explicit width, signedness, and a `BigInt` of the canonical mathematical value
 /// (not a field-reduced one), so a `u64` at or above the field modulus survives intact and the same
 /// computation yields identical integer/bool results under bn254 and Goldilocks — the property the
-/// cross-field differential checks. `Field` values use the compiled-in [`FieldElement`].
+/// cross-field differential checks. A `Field` value carries the field it belongs to, so one build
+/// interprets a program under any of them.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
-    Field(FieldElement),
+    Field(FieldValue),
     Int(IntValue),
     Bool(bool),
     Unit,
@@ -44,12 +45,6 @@ pub struct IntValue {
 
 fn pow2(bits: u32) -> BigInt {
     BigInt::one() << bits as usize
-}
-
-/// The non-negative integer value of a field element. Unlike `FieldElement::to_u128`, this does
-/// not panic for values `>= 2^128` (bn254 elements are up to ~254 bits).
-pub fn field_to_bigint(field: &FieldElement) -> BigInt {
-    BigInt::from_bytes_be(Sign::Plus, &field.to_be_bytes())
 }
 
 /// Reduce `raw` into the canonical two's-complement representative for `(signed, bits)`.
@@ -111,12 +106,12 @@ impl IntValue {
         }
     }
 
-    /// Encode the bit pattern exactly; reject widths Noir does not allow in casts to `Field`.
-    pub fn try_to_field(&self) -> Option<FieldElement> {
-        (self.bits < FieldElement::max_num_bits()).then(|| {
-            let (_, bytes) = self.unsigned_repr().to_bytes_be();
-            FieldElement::from_be_bytes_reduce(&bytes)
-        })
+    /// Encode the bit pattern exactly when its width satisfies [`FieldConfig::fits_unsigned`].
+    pub fn try_to_field(&self, field: FieldConfig) -> Option<FieldValue> {
+        if !field.fits_unsigned(self.bits) {
+            return None;
+        }
+        FieldValue::try_from_bigint(&self.unsigned_repr(), field.id())
     }
 }
 
