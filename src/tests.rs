@@ -1,16 +1,19 @@
+use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use super::corpus::{compile_error_of, copy_dir, corpus_dir, list_programs, panic_message};
+use super::corpus::{
+    compile_error_of, copy_dir, corpus_dir, list_programs, panic_message, temp_noir_package,
+};
 use super::diff::{FailureKind, comparable_error_of};
-#[cfg(not(feature = "goldilocks"))]
 use super::expected_return_from_prover_toml;
 use super::loader::NoirProject;
-use super::validation_frontend::compile_for_validation;
+use super::validation_frontend::{Validated, compile_for_validation};
 use super::{
     IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
 };
-use acvm::FieldId;
+use acvm::{FieldConfig, FieldId, FieldValue};
 use num_bigint::BigInt;
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
@@ -33,9 +36,12 @@ fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(interpret(&validated.program, validated.field_id)?)
 }
 
-/// One build compiles and interprets the same program under two fields. This is what the field
-/// label on the monomorphized output buys: the interpreter takes its field from the program rather
-/// than from the compiler it was built against.
+fn compile_source(source: &str, field: FieldId) -> Validated {
+    let root = temp_noir_package("test", source);
+    let project = NoirProject::new(root.path().to_path_buf()).expect("project");
+    compile_for_validation(&project, field).expect("frontend compile")
+}
+
 #[test]
 fn one_build_interprets_a_program_under_two_fields() {
     let project = NoirProject::new(fixture("interp_basic")).expect("project");
@@ -49,14 +55,141 @@ fn one_build_interprets_a_program_under_two_fields() {
         let result = interpret(&validated.program, validated.field_id)
             .unwrap_or_else(|error| panic!("{field}: interpret: {error:?}"));
         assert_eq!(result, Value::Unit, "{field}: main returns unit");
+
+        let validated = compile_source("fn main(x: Field) -> pub Field { x - 2 }", field);
+        let result = interpret_with_inputs(
+            &validated.program,
+            vec![Value::Field(FieldValue::one(field))],
+            validated.field_id,
+        )
+        .expect("field arithmetic");
+        let Value::Field(result) = result else {
+            panic!("expected a Field return")
+        };
+        assert_eq!(result.field(), field);
+        assert_eq!(
+            result.as_biguint(),
+            &(FieldConfig::new(field).modulus() - 1u8)
+        );
     }
 }
 
-/// The basic fixture checks arithmetic, control flow and casts under both fields.
 #[test]
-fn interprets_basic_corpus_program() {
-    let result = interpret_fixture("interp_basic").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
+fn toml_bridge_requires_the_linked_field() {
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
+        for (toml, expected) in [
+            ("x = -1\nreturn = -1", -FieldValue::one(field)),
+            ("x = 1\nreturn = 1", FieldValue::one(field)),
+        ] {
+            let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, toml, field);
+            let recorded =
+                expected_return_from_prover_toml(&validated.program, &validated.abi, toml, field);
+            if field == FieldId::linked() {
+                assert_eq!(inputs.unwrap(), vec![Value::Field(expected.clone())]);
+                assert_eq!(recorded.unwrap(), Some(Value::Field(expected)));
+            } else {
+                assert!(
+                    matches!(inputs, Err(InterpretError::InvalidInput(_))),
+                    "{field}: {inputs:?}"
+                );
+                assert!(
+                    matches!(recorded, Err(InterpretError::InvalidInput(_))),
+                    "{field}: {recorded:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rejects_inputs_from_another_field() {
+    let field = FieldId::linked();
+    let other = if field == FieldId::Bn254 {
+        FieldId::Goldilocks
+    } else {
+        FieldId::Bn254
+    };
+    let good = Value::Field(FieldValue::one(field));
+    let bad = Value::Field(FieldValue::one(other));
+    let cell = |value: &Value| Rc::new(RefCell::new(value.clone()));
+    for (source, good_input, bad_input) in [
+        (
+            "fn main(x: Field) -> pub Field { x }",
+            good.clone(),
+            bad.clone(),
+        ),
+        (
+            "fn main(x: ([Field; 1], Field)) -> pub Field { x.1 }",
+            Value::tuple(vec![Value::Array(vec![good.clone()]), good.clone()]),
+            Value::tuple(vec![Value::Array(vec![bad.clone()]), good.clone()]),
+        ),
+    ] {
+        let validated = compile_source(source, field);
+        assert_eq!(
+            interpret_with_inputs(&validated.program, vec![good_input], field).unwrap(),
+            good
+        );
+        let result = interpret_with_inputs(&validated.program, vec![bad_input], field);
+        assert!(
+            matches!(result, Err(InterpretError::InvalidInput(_))),
+            "{result:?}"
+        );
+    }
+
+    // Noir refuses a reference as an entry-point type, so a `Ref` input is always a caller error
+    // and has no accepted spelling to check; the traversal still has to look inside one rather
+    // than take it for a leaf.
+    let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
+    for hidden in [
+        Value::Ref(cell(&bad), false),
+        Value::Array(vec![Value::Ref(cell(&bad), false)]),
+        Value::tuple(vec![Value::Ref(cell(&bad), true)]),
+    ] {
+        match interpret_with_inputs(&validated.program, vec![hidden.clone()], field) {
+            Err(InterpretError::InvalidInput(message)) => {
+                assert!(
+                    message.contains(&format!("belongs to {other}")),
+                    "{message}"
+                )
+            }
+            result => panic!("{hidden:?}: {result:?}"),
+        }
+    }
+}
+
+/// `IntValue`'s members are public, so an input can name a value its own type does not hold.
+#[test]
+fn rejects_an_integer_input_outside_its_type() {
+    let field = FieldId::linked();
+    let int = |signed, bits, value: i64| IntValue {
+        signed,
+        bits,
+        value: BigInt::from(value),
+    };
+    let validated = compile_source("fn main(x: [u8; 1], y: i8) -> pub u8 { x[0] }", field);
+    let run = |x: IntValue, y: IntValue| {
+        let inputs = vec![Value::Array(vec![Value::Int(x)]), Value::Int(y)];
+        interpret_with_inputs(&validated.program, inputs, field)
+    };
+    let (u8_max, i8_min) = (int(false, 8, 255), int(true, 8, -128));
+    assert_eq!(
+        run(u8_max.clone(), i8_min.clone()).unwrap(),
+        Value::Int(int(false, 8, 255))
+    );
+    for (x, y) in [
+        (int(false, 8, 256), i8_min.clone()),
+        (int(false, 8, -1), i8_min.clone()),
+        (int(false, 0, 0), i8_min.clone()),
+        (u8_max.clone(), int(true, 8, 128)),
+        (u8_max.clone(), int(true, 8, -129)),
+    ] {
+        let result = run(x.clone(), y.clone());
+        assert!(
+            matches!(result, Err(InterpretError::InvalidInput(_))),
+            "{x:?}, {y:?}: {result:?}"
+        );
+    }
 }
 
 /// Integer-to-integer casts keep a `u64` above the Goldilocks modulus intact, at run time and in
@@ -614,12 +747,7 @@ fn oracle_compare(program_dir: &Path) -> String {
                         Err(e) => return format!("oracle-errored: {e}"),
                     };
                     match validated.abi.return_type.as_ref() {
-                        Some(r) => match crate::input::value_from_input(
-                            &iv,
-                            &r.abi_type,
-                            ret_ty,
-                            acvm::FieldConfig::new(validated.field_id),
-                        ) {
+                        Some(r) => match crate::input::value_from_input(&iv, &r.abi_type, ret_ty) {
                             Ok(v) => v,
                             Err(e) => return format!("oracle-errored: decode: {e}"),
                         },

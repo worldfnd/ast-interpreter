@@ -88,6 +88,8 @@ pub fn interpret(program: &Program, field: FieldId) -> Result<Value, InterpretEr
 
 /// Interpret `program`'s entry point, binding `inputs` to `main`'s parameters in order.
 ///
+/// `field` must match the compiled program. Every `Field` input must belong to that field, and
+/// every integer input must be a value of the width and signedness it declares.
 /// Use [`inputs_from_prover_toml`] to build `inputs` from a `Prover.toml` file and the ABI.
 pub fn interpret_with_inputs(
     program: &Program,
@@ -103,6 +105,7 @@ pub fn interpret_with_inputs(
             inputs.len()
         )));
     }
+    input::validate_inputs(&inputs, field)?;
     interp.call_function(main.id, inputs)
 }
 

@@ -6,7 +6,10 @@
 //! complement pattern; the parser has already refused any value whose pattern does not fit the
 //! field, so decoding that pattern is exact.
 
-use acvm::{AcirField, FieldConfig, FieldId, FieldValue};
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use acvm::{AcirField, FieldId, FieldValue};
 
 use noirc_abi::{
     Abi, AbiType, MAIN_RETURN_NAME,
@@ -19,15 +22,16 @@ use super::value::{IntValue, Value};
 
 /// Parse `toml_src` against `abi` and bind each value to `main`'s parameters in order.
 ///
-/// `field` is the field the program was compiled under; an input the ABI parser accepted but that
-/// field cannot hold is refused here.
+/// `field` must match both the compiled program and [`FieldId::linked`]. The ABI parser resolves
+/// native `-1` and quoted `p - 1` to the same linked-field element, losing the spelling needed to
+/// interpret them in another field. Cross-field parsing is rejected until the codec supports it.
 pub fn inputs_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
     field: FieldId,
 ) -> Result<Vec<Value>, InterpretError> {
-    let field_config = FieldConfig::new(field);
+    require_linked_field(field)?;
     // An unrepresentable recorded return must not prevent parsing the inputs.
     let parameters_only = Abi {
         return_type: None,
@@ -50,7 +54,7 @@ pub fn inputs_from_prover_toml(
         let input = map
             .get(name)
             .ok_or_else(|| InterpretError::Internal(format!("no parsed input for '{name}'")))?;
-        inputs.push(value_from_input(input, abi_type, typ, field_config)?);
+        inputs.push(value_from_input(input, abi_type, typ)?);
     }
     Ok(inputs)
 }
@@ -58,13 +62,14 @@ pub fn inputs_from_prover_toml(
 /// Decode the expected `main` return value recorded in `Prover.toml` (the `return = ...` field), if
 /// present. Noir's test corpus records this as the program's known-correct output, so it is a
 /// ground-truth reference the interpreter's result can be checked against.
+/// Requires the linked field, as [`inputs_from_prover_toml`] does.
 pub fn expected_return_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
     field: FieldId,
 ) -> Result<Option<Value>, InterpretError> {
-    let field_config = FieldConfig::new(field);
+    require_linked_field(field)?;
     let map = Format::Toml
         .parse(toml_src, abi)
         .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
@@ -81,12 +86,79 @@ pub fn expected_return_from_prover_toml(
                 "Prover.toml parsed a return value but the ABI declares no return type".to_string(),
             )
         })?;
-    Ok(Some(value_from_input(
-        input,
-        abi_type,
-        &main.return_type,
-        field_config,
-    )?))
+    Ok(Some(value_from_input(input, abi_type, &main.return_type)?))
+}
+
+fn require_linked_field(field: FieldId) -> Result<(), InterpretError> {
+    if field != FieldId::linked() {
+        return Err(InterpretError::InvalidInput(format!(
+            "Prover.toml parsing for {field} requires a build linked against it; this build uses {}",
+            FieldId::linked()
+        )));
+    }
+    Ok(())
+}
+
+/// Check the invariants the interpreter relies on but cannot restore from a caller-built [`Value`]:
+/// every `Field` belongs to `field`, and every integer is canonical for its own type. [`IntValue`]'s
+/// members are public, so an input can be spelled outside the range its width and signedness name.
+pub(crate) fn validate_inputs(inputs: &[Value], field: FieldId) -> Result<(), InterpretError> {
+    fn check(
+        value: &Value,
+        field: FieldId,
+        seen: &mut HashSet<*const std::cell::RefCell<Value>>,
+    ) -> Result<(), InterpretError> {
+        let cells = match value {
+            Value::Field(value) if value.field() != field => {
+                return Err(InterpretError::InvalidInput(format!(
+                    "Field input belongs to {}, but the program uses {field}",
+                    value.field()
+                )));
+            }
+            Value::Int(int) => return check_int(int),
+            Value::Array(values) => {
+                return values
+                    .iter()
+                    .try_for_each(|value| check(value, field, seen));
+            }
+            Value::Tuple(cells) => cells.as_slice(),
+            Value::Ref(cell, _) => std::slice::from_ref(cell),
+            _ => return Ok(()),
+        };
+        for cell in cells {
+            // Shared or cyclic references need only one visit per cell.
+            if seen.insert(Rc::as_ptr(cell)) {
+                let value = cell.try_borrow().map_err(|_| {
+                    InterpretError::InvalidInput("input cell is mutably borrowed".to_string())
+                })?;
+                check(&value, field, seen)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut seen = HashSet::new();
+    inputs
+        .iter()
+        .try_for_each(|input| check(input, field, &mut seen))
+}
+
+fn check_int(int: &IntValue) -> Result<(), InterpretError> {
+    let sign = if int.signed { 'i' } else { 'u' };
+    // A zero-width type holds no values at all, and `range` would underflow computing `bits - 1`.
+    if int.bits == 0 {
+        return Err(InterpretError::InvalidInput(format!(
+            "integer input declares the empty type {sign}0"
+        )));
+    }
+    let (min, max) = IntValue::range(int.signed, int.bits);
+    if int.value < min || int.value > max {
+        return Err(InterpretError::InvalidInput(format!(
+            "integer input {} is not a value of {sign}{}",
+            int.value, int.bits
+        )));
+    }
+    Ok(())
 }
 
 /// Map one ABI [`InputValue`] onto a monomorphized [`Type`], producing a [`Value`]. `abi_type`
@@ -96,25 +168,10 @@ pub(crate) fn value_from_input(
     input: &InputValue,
     abi_type: &AbiType,
     typ: &Type,
-    field_config: FieldConfig,
 ) -> Result<Value, InterpretError> {
     match (input, typ) {
-        // The ABI parser reads values in the field the compiler is linked against, and the
-        // entry-point rule tells a native `-1` from a quoted `p - 1` by their source syntax, which
-        // an `InputValue::Field` has already erased: both arrive as the same element. Re-homing
-        // one in another field would have to guess, so this takes the representative as it stands
-        // and refuses what the interpreted field has no value for. Identity when the two fields
-        // are the same, which is what the corpus sweep runs.
         (InputValue::Field(field), Type::Field) => {
-            let value = FieldValue::from_linked_element(*field);
-            FieldValue::try_from_biguint(value.as_biguint().clone(), field_config.id())
-                .map(Value::Field)
-                .ok_or_else(|| {
-                    InterpretError::InvalidInput(format!(
-                        "Field input {value} is not a value of {}",
-                        field_config.name()
-                    ))
-                })
+            Ok(Value::Field(FieldValue::from_linked_element(*field)))
         }
         (InputValue::Field(field), Type::Integer(signedness, bits)) => {
             let width = u32::from(bits.bit_size());
@@ -125,19 +182,11 @@ pub(crate) fn value_from_input(
                     "integer input does not fit a {width}-bit type"
                 )));
             }
-            let value = IntValue::canonical(signedness.is_signed(), width, raw);
-            // The entry point encodes every scalar as exactly one field element, so an integer
-            // crosses it only if its unsigned fixed-width bit pattern is a value of the field. The
-            // ABI parser applies that rule for the field it is linked against; the interpreted
-            // field needs it applied again, or a build linked to a wider field would silently
-            // accept inputs a narrower one refuses.
-            if FieldValue::try_from_bigint(&value.unsigned_repr(), field_config.id()).is_none() {
-                return Err(InterpretError::InvalidInput(format!(
-                    "the bit pattern of this {width}-bit input is not a value of {}",
-                    field_config.name()
-                )));
-            }
-            Ok(Value::Int(value))
+            Ok(Value::Int(IntValue::canonical(
+                signedness.is_signed(),
+                width,
+                raw,
+            )))
         }
         (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(!field.is_zero())),
         (InputValue::Vec(elements), Type::Array(length, element_type)) => {
@@ -163,7 +212,7 @@ pub(crate) fn value_from_input(
             }
             let values = elements
                 .iter()
-                .map(|element| value_from_input(element, element_abi, element_type, field_config))
+                .map(|element| value_from_input(element, element_abi, element_type))
                 .collect::<Result<_, _>>()?;
             Ok(Value::Array(values))
         }
@@ -192,9 +241,7 @@ pub(crate) fn value_from_input(
                 .iter()
                 .zip(types)
                 .zip(elements)
-                .map(|((field_abi, typ), element)| {
-                    value_from_input(element, field_abi, typ, field_config)
-                })
+                .map(|((field_abi, typ), element)| value_from_input(element, field_abi, typ))
                 .collect::<Result<_, _>>()?;
             Ok(Value::tuple(values))
         }
@@ -220,7 +267,7 @@ pub(crate) fn value_from_input(
                     let value = map.get(name).ok_or_else(|| {
                         InterpretError::Internal(format!("ABI struct has no field '{name}'"))
                     })?;
-                    value_from_input(value, field_abi, typ, field_config)
+                    value_from_input(value, field_abi, typ)
                 })
                 .collect::<Result<_, _>>()?;
             Ok(Value::tuple(values))

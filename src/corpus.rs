@@ -42,6 +42,20 @@ pub(crate) fn fixtures_dir() -> PathBuf {
     crate_dir().join("fixtures")
 }
 
+/// Write a single-file Noir binary package into a fresh temporary directory. The caller keeps the
+/// returned handle alive for as long as it needs the sources on disk.
+pub(crate) fn temp_noir_package(name: &str, source: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(
+        root.path().join("Nargo.toml"),
+        format!("[package]\nname = \"{name}\"\ntype = \"bin\"\nauthors = []\n"),
+    )
+    .unwrap();
+    std::fs::write(root.path().join("src/main.nr"), source).unwrap();
+    root
+}
+
 fn enabled_features() -> Vec<String> {
     if cfg!(feature = "goldilocks") {
         vec!["goldilocks".to_string()]

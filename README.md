@@ -20,8 +20,10 @@ ast-interpreter = { git = "https://github.com/worldfnd/ast-interpreter.git", rev
 Use `interpret` for self-checking programs with no inputs, or `interpret_with_inputs` when `main` takes
 arguments. Both take the `FieldId` the program was compiled under, which
 `MonomorphizationOutput::field_id` records. For `Prover.toml` inputs, use `inputs_from_prover_toml`
-and `expected_return_from_prover_toml`, which take the same field and refuse an input it cannot
-hold.
+and `expected_return_from_prover_toml`. These helpers require that field to match
+`FieldId::linked()` because the ABI parser uses the linked field. For another field, construct
+`Value` inputs directly; every `FieldValue` must belong to the program's field, and every `IntValue`
+must be a value of the width and signedness it declares.
 
 Crates that pass Noir AST values into this interpreter must use the same pinned `noirc_frontend` and
 `acvm` sources, spelled the same way. Cargo keys a git dependency on the URL *and* the reference, so
