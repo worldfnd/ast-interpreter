@@ -11,7 +11,7 @@ use noirc_frontend::ast::BinaryOpKind;
 
 use crate::error::InterpretError;
 use crate::eval::eval_int_binary;
-use crate::value::{IntValue, Value, field_to_bigint, wrap};
+use crate::value::{IntValue, Value, wrap};
 
 /// Noir widths plus the planned arbitrary-width carrier cases.
 fn width() -> impl Strategy<Value = u32> {
@@ -188,7 +188,7 @@ proptest! {
         match iv.try_to_field(config) {
             Some(field) => {
                 prop_assert!(config.fits_unsigned(bits));
-                prop_assert_eq!(field_to_bigint(&field), iv.unsigned_repr());
+                prop_assert_eq!(field.to_bigint(), iv.unsigned_repr());
             }
             None => prop_assert!(!config.fits_unsigned(bits)),
         }

@@ -47,11 +47,6 @@ fn pow2(bits: u32) -> BigInt {
     BigInt::one() << bits as usize
 }
 
-/// The non-negative representative of a field value, which may need more than 128 bits.
-pub fn field_to_bigint(field: &FieldValue) -> BigInt {
-    field.to_bigint()
-}
-
 /// Reduce `raw` into the canonical two's-complement representative for `(signed, bits)`.
 pub fn wrap(signed: bool, bits: u32, raw: BigInt) -> BigInt {
     let modulus = pow2(bits);
@@ -111,10 +106,7 @@ impl IntValue {
         }
     }
 
-    /// Encode the bit pattern exactly; reject widths Noir does not allow in casts to `Field`.
-    ///
-    /// The width rule is the compiler's own (`FieldConfig::fits_unsigned`), so a cast this accepts
-    /// is exactly one the type checker admitted.
+    /// Encode the bit pattern exactly when its width satisfies [`FieldConfig::fits_unsigned`].
     pub fn try_to_field(&self, field: FieldConfig) -> Option<FieldValue> {
         if !field.fits_unsigned(self.bits) {
             return None;

@@ -10,7 +10,7 @@ use noirc_frontend::monomorphization::ast::Type;
 
 use super::Interpreter;
 use super::error::InterpretError;
-use super::value::{IntValue, Value, field_to_bigint};
+use super::value::{IntValue, Value};
 
 impl<'p> Interpreter<'p> {
     /// Dispatch a `#[builtin]`/`#[foreign]` call. `return_type` supplies the limb count for
@@ -252,7 +252,7 @@ fn to_radix(
             "radix {radix} must be in [2, 256]"
         )));
     }
-    let value = field_to_bigint(field);
+    let value = field.to_bigint();
     // `to_radix_le` represents zero as a single `[0]` limb; treat zero as no significant limbs.
     let digits: Vec<u8> = if value.is_zero() {
         Vec::new()
@@ -322,7 +322,7 @@ fn apply_range_constraint(args: &[Value], location: Location) -> Result<Value, I
         }
     };
     let bit_size = arg_u64(args, 1)?;
-    if field_to_bigint(field).bits() > bit_size {
+    if field.to_bigint().bits() > bit_size {
         return Err(InterpretError::AssertionFailed {
             location,
             message: Some("call to assert_max_bit_size".to_string()),

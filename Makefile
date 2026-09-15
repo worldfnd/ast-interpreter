@@ -8,9 +8,7 @@ test:
 	$(CARGO) test --locked
 	$(CARGO) test --locked --features goldilocks
 
-# `FIELD` names the swept field explicitly; the build still has to be linked against it, because
-# `Prover.toml` inputs reach the interpreter through the ABI parser and that parser reads them in
-# the linked field. The sweep asserts the two agree.
+# The ABI parser requires a build linked against the swept field.
 sweep:
 	@case "$(FIELD)" in bn254|goldilocks) ;; *) echo "FIELD must be bn254 or goldilocks" >&2; exit 1 ;; esac
 	FIELD=$(FIELD) $(CARGO) test --locked --lib $(if $(filter goldilocks,$(FIELD)),--features goldilocks) status::dump_records -- --exact --ignored --nocapture

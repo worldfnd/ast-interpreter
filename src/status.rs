@@ -490,11 +490,7 @@ fn swept_field() -> FieldId {
 /// `make sweep FIELD=<field>`: record the corpus and the fixtures under `FIELD` into
 /// `target/status/<field>.json`.
 ///
-/// `FIELD` names the field explicitly rather than leaving the build to imply it, but it must still
-/// be the field this build is linked against: `Prover.toml` values reach the interpreter through
-/// the ABI parser, which reads them in the linked field and resolves a native `-1` and a quoted
-/// `p - 1` to the same element. Re-homing those in another field cannot tell them apart, so a
-/// sweep of a field needs a build for it until the ABI codec takes a field of its own.
+/// Requires a build linked against `FIELD` because the ABI parser uses the linked field.
 #[test]
 #[ignore = "status: run `make sweep FIELD=<field>`"]
 fn dump_records() {
@@ -575,10 +571,6 @@ fn render_status_file() {
         (pa.field.as_str(), pb.field.as_str()),
         ("bn254", "goldilocks")
     );
-    assert_ne!(
-        pa.field_modulus, pb.field_modulus,
-        "both dumps are the same field"
-    );
     for (p, tag) in [(pa, "bn254"), (pb, "goldilocks")] {
         assert_eq!(
             p.projection_version, PROJECTION_VERSION,
@@ -603,12 +595,20 @@ fn render_status_file() {
     );
     assert_eq!(pa.program_count, pb.program_count);
 
-    // The sides are named by the dumps themselves, not assumed by the renderer.
+    // Each dump names its own field; the modulus it recorded has to agree with that name.
     let side = |p: &DumpProvenance| {
-        FieldConfig::new(
+        let config = FieldConfig::new(
             FieldId::from_name(&p.field)
                 .unwrap_or_else(|| panic!("dump names an unknown field {}", p.field)),
-        )
+        );
+        assert_eq!(
+            p.field_modulus,
+            config.modulus().to_string(),
+            "the {} dump records a modulus that is not {}'s",
+            config.name(),
+            config.name()
+        );
+        config
     };
     let sides = Sides {
         a: side(pa),

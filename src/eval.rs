@@ -16,7 +16,7 @@ use noirc_frontend::token::FmtStrFragment;
 use noirc_printable_type::PrintableType;
 
 use super::error::InterpretError;
-use super::value::{IntValue, Value, field_to_bigint};
+use super::value::{IntValue, Value};
 use super::{Flow, Frame, GlobalState, Interpreter};
 
 /// The resolved target of a call: a user function, or a builtin/foreign intrinsic dispatched by name.
@@ -543,10 +543,8 @@ impl<'p> Interpreter<'p> {
                 let raw = match value {
                     Value::Int(int) => int.value,
                     Value::Bool(b) => BigInt::from(b as u8),
-                    // Noir casts Field -> integer by truncating mod 2^bits (see ssa_gen
-                    // `insert_safe_cast`). `canonical` does the truncation; `field_to_bigint`
-                    // avoids `to_u128`'s panic for field values >= 2^128.
-                    Value::Field(f) => field_to_bigint(&f),
+                    // `canonical` truncates the representative modulo 2^bits, matching Noir.
+                    Value::Field(f) => f.to_bigint(),
                     other => {
                         return Err(InterpretError::Type(format!(
                             "cannot cast {other:?} to an integer"
@@ -1055,12 +1053,9 @@ fn format_value(value: &Value, typ: &PrintableType) -> Result<String, InterpretE
         }
         (Value::Tuple(cells), PrintableType::Enum { name, variants }) => {
             let tag_cell = cells.first().ok_or_else(mismatch)?.borrow();
-            // The tag is always a `Field` (`case_matches` rejects anything else); `field_to_bigint`
-            // avoids `to_u128`'s panic on an oversized tag.
+            // Enum tags are fields; reject an oversized tag without truncating it.
             let tag = match &*tag_cell {
-                Value::Field(tag) => {
-                    usize::try_from(field_to_bigint(tag)).map_err(|_| mismatch())?
-                }
+                Value::Field(tag) => usize::try_from(tag.to_bigint()).map_err(|_| mismatch())?,
                 _ => return Err(mismatch()),
             };
             drop(tag_cell);
@@ -1145,7 +1140,7 @@ fn case_matches(constructor: &Constructor, scrutinee: &Value) -> Result<bool, In
                 ));
             };
             let tag = match &*cell.borrow() {
-                Value::Field(tag) => field_to_bigint(tag),
+                Value::Field(tag) => tag.to_bigint(),
                 _ => {
                     return Err(InterpretError::Type("enum tag is not a Field".to_string()));
                 }

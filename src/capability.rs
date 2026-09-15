@@ -14,10 +14,7 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
-    /// Whether `field` has this property.
-    ///
-    /// The width predicates are the compiler's own (`FieldConfig::fits_unsigned`), so a gap
-    /// predicted here is one the compiler's own rule produces rather than a restatement of it.
+    /// Whether `field` has this property, using the compiler's width rule.
     pub(crate) fn holds(&self, field: FieldConfig) -> bool {
         match self {
             Capability::UnsignedFits(bits) | Capability::SignedFits(bits) => {

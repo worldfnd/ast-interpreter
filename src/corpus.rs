@@ -747,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_return_comparison_is_exact_on_bn254_and_field_opaque_on_goldilocks() {
+    fn recorded_field_returns_are_compared_exactly_only_on_bn254() {
         let int = |v: u64| {
             Value::Int(IntValue {
                 signed: false,

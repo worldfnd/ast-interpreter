@@ -85,8 +85,8 @@ fn diagnostic_summary(diagnostics: &[CustomDiagnostic]) -> String {
 
 /// Run the Noir frontend through monomorphization and return the mono-AST + ABI.
 ///
-/// Under `goldilocks`, dependency-only elaboration errors are tolerated if no rejected code reaches
-/// the monomorphized program.
+/// Under non-BN254 fields, dependency-only elaboration errors are tolerated if no rejected code
+/// reaches the monomorphized program.
 pub(crate) fn compile_for_validation(
     source: &impl PackageSource,
     field: FieldId,
@@ -135,8 +135,6 @@ pub(crate) fn compile_for_validation(
     )?;
     let program = output.program;
 
-    // The label travels beside the program; check it before interpreting rather than assuming the
-    // compilation honoured what was asked for.
     assert_eq!(
         output.field_id, field,
         "ICE: asked for a {field} program and got a {} one",
@@ -160,11 +158,7 @@ pub(crate) fn compile_for_validation(
 /// Return dependency files with tolerated diagnostics. Package diagnostics remain fatal, and
 /// callers must reject monomorphized code originating from a tolerated file.
 ///
-/// The standard library's un-gated code is written for bn254 — its `modulus_num_bits() == 254`
-/// assertion and the constants of `std::field::bn254`, which no `#[field]` attribute drops — so a
-/// compilation for any other field reaches dependency errors that say nothing about the program
-/// under test. Gating that code is the standard library's own work; until it is done, those
-/// diagnostics are tolerated and the program is rejected only if it reaches the code behind them.
+/// Non-BN254 compilations encounter errors in stdlib code that is not yet gated by field.
 fn tolerated_dependency_error_files(
     context: &Context,
     crate_id: CrateId,
