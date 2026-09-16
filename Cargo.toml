@@ -11,6 +11,9 @@ noirc_errors.workspace = true
 noirc_frontend.workspace = true
 noirc_printable_type.workspace = true
 
+# bn254's curve, Pedersen-generator and Poseidon2 black boxes; only a bn254 build holds their
+# field elements.
+bn254_blackbox_solver = { workspace = true, optional = true }
 # `DiffValue` serializes `BigInt` payloads in dump JSON.
 num-bigint = { version = "0.5", features = ["serde"] }
 num-traits = { version = "0.2" }
@@ -29,13 +32,18 @@ nargo.workspace = true
 noirc_driver.workspace = true
 # Executor oracle used by tests.
 noirc_artifacts.workspace = true
-bn254_blackbox_solver.workspace = true
 serde_json = { version = "1.0" }
 tempfile.workspace = true
 # Randomized value-semantics tests.
 proptest = "1"
 
 [features]
+default = ["bn254-crypto"]
+
+# Route the embedded-curve, Pedersen-generator and Poseidon2 built-ins to `bn254_blackbox_solver`.
+# A `goldilocks` build must disable it: `--no-default-features --features goldilocks`.
+bn254-crypto = ["dep:bn254_blackbox_solver"]
+
 # Build the pinned Noir stack with Goldilocks.
 goldilocks = [
     "noirc_frontend/goldilocks",
