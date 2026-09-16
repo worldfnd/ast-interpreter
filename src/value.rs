@@ -26,6 +26,10 @@ pub enum Value {
     // Fields are shared cells so `&mut s.field` aliases; value reads `deep_copy` out.
     Tuple(Vec<Rc<RefCell<Value>>>),
     Str(String),
+    /// A formatted string whose text is not what Noir prints: an interpolated struct or enum lost
+    /// its name in the mono AST. `print` may discard it and a call may forward it; storing it in a
+    /// binding is refused.
+    LossyStr(String),
     Function(FuncId),
     // Shared cell. `auto_deref` = a `let mut`/mutable-param slot (loaded on a bare read); a plain
     // `&`/`&mut` reference is `false`.
@@ -86,8 +90,7 @@ impl IntValue {
     pub fn checked(signed: bool, bits: u32, raw: BigInt, op: &str) -> Result<Self, InterpretError> {
         let (min, max) = Self::range(signed, bits);
         if raw < min || raw > max {
-            let sign = if signed { 'i' } else { 'u' };
-            return Err(InterpretError::Overflow(format!("{op} on {sign}{bits}")));
+            return Err(InterpretError::Overflow(op.to_string()));
         }
         Ok(IntValue {
             signed,

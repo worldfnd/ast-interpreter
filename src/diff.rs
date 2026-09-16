@@ -44,7 +44,8 @@ impl DiffValue {
             },
             Value::Bool(b) => DiffValue::Bool(*b),
             Value::Unit => DiffValue::Unit,
-            Value::Str(s) => DiffValue::Str(s.clone()),
+            // An entry point cannot return a format string, so a lossy one never reaches a dump.
+            Value::Str(s) | Value::LossyStr(s) => DiffValue::Str(s.clone()),
             Value::Array(elements) => {
                 DiffValue::Array(elements.iter().map(DiffValue::from_value).collect())
             }

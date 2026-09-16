@@ -1,0 +1,6 @@
+[package]
+name = "interp_derive_eq_hash"
+type = "bin"
+authors = [""]
+
+[dependencies]
