@@ -8,11 +8,12 @@ use nargo::package::Package;
 use noirc_abi::Abi;
 use noirc_errors::CustomDiagnostic;
 use noirc_frontend::debug::DebugInstrumenter;
-use noirc_frontend::hir::{Context, ParsedFiles};
+use noirc_frontend::hir::{Context, FunctionNameMatch, ParsedFiles};
 use noirc_frontend::monomorphization::Monomorphizer;
 use noirc_frontend::monomorphization::ast::Program;
 use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
 use noirc_frontend::node_interner::FuncId;
+use noirc_frontend::token::TestScope;
 use sha2::{Digest, Sha256};
 
 /// The package data Noir's [`nargo::prepare_package`] needs.
@@ -177,6 +178,33 @@ pub(crate) fn compile_for_validation(
         abi,
         field_id,
     })
+}
+
+/// One `#[test]` of the standard library, monomorphized under the field `source` was checked for.
+pub(crate) struct StdlibTest {
+    pub name: String,
+    pub scope: TestScope,
+    pub program: Result<Program, ValidationError>,
+}
+
+/// Every argument-less `#[test]` the standard library keeps under `field`.
+pub(crate) fn stdlib_tests(
+    source: &impl PackageSource,
+    field: FieldId,
+) -> Result<Vec<StdlibTest>, ValidationError> {
+    let mut context = check_package(source, field)?;
+    let stdlib = *context.stdlib_crate_id();
+    let tests =
+        context.get_all_test_functions_in_crate_matching(&stdlib, &FunctionNameMatch::Anything);
+    Ok(tests
+        .into_iter()
+        .filter(|(_, test)| !test.has_arguments)
+        .map(|(name, test)| StdlibTest {
+            name,
+            scope: test.scope,
+            program: monomorphize(&mut context, test.id, field).map(|(program, _)| program),
+        })
+        .collect())
 }
 
 fn monomorphization_error(

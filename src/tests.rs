@@ -9,11 +9,12 @@ use super::corpus::{
 use super::diff::{FailureKind, comparable_error_of};
 use super::expected_return_from_prover_toml;
 use super::loader::NoirProject;
-use super::validation_frontend::{Validated, compile_for_validation};
+use super::validation_frontend::{Validated, compile_for_validation, stdlib_tests};
 use super::{
     IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
 };
 use acvm::{FieldConfig, FieldId, FieldValue};
+use noirc_frontend::token::TestScope;
 use num_bigint::BigInt;
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
@@ -543,6 +544,38 @@ fn renders_assert_message() {
     }
 }
 
+#[test]
+fn stored_format_strings_reject_erased_type_names() {
+    let validated = compile_source(
+        "struct Pair { x: u32 } fn main(flag: bool) {
+         let p = Pair { x: 7 }; let message = f\"value: {p}\"; assert(flag, message); }",
+        FieldId::linked(),
+    );
+    let result = interpret_with_inputs(
+        &validated.program,
+        vec![Value::Bool(false)],
+        validated.field_id,
+    );
+    assert!(
+        matches!(result, Err(InterpretError::Unsupported(ref message)) if message.contains("erased type metadata")),
+        "{result:?}"
+    );
+}
+
+/// A struct in a format string loses its name in the mono AST; that is fine on the way to
+/// `print`, whose text is dropped.
+#[test]
+fn printed_format_strings_may_interpolate_erased_aggregates() {
+    let validated = compile_source(
+        "struct Pair { x: u32 } fn main() { let p = Pair { x: 7 }; println(f\"value: {p}\"); }",
+        FieldId::linked(),
+    );
+    assert_eq!(
+        interpret(&validated.program, validated.field_id).unwrap(),
+        Value::Unit
+    );
+}
+
 /// A `main` with inputs interprets correctly from `Prover.toml`. `assert_statement` has `x == y == 3`.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
@@ -677,6 +710,21 @@ fn rejects_invalid_integer_widths() {
     }
 }
 
+#[test]
+fn interprets_stdlib_fixtures() {
+    for (name, expected) in [
+        (
+            "interp_wrapping_ops",
+            Value::Int(IntValue::canonical(false, 64, BigInt::from(7))),
+        ),
+        ("interp_hash_limbs", Value::Bool(false)),
+        ("interp_field_lt", Value::Bool(true)),
+        ("interp_derive_eq_hash", Value::Bool(false)),
+    ] {
+        assert_fixture_return(name, expected);
+    }
+}
+
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn bn254_accepts_input_above_the_goldilocks_modulus() {
@@ -707,6 +755,135 @@ fn goldilocks_rejects_input_above_its_modulus() {
 
 // --- Differential oracle: interpreter vs Noir's own ACVM/Brillig executor (see `noir_oracle.rs`).
 // Two independent lowerings (tree-walk vs full ACIR compile+execute) must agree on the return. ---
+
+/// Run every argument-less stdlib test; bn254's crypto black boxes are the only coverage gap.
+#[test]
+fn the_stdlib_tests_pass_under_the_linked_field() {
+    let root = temp_noir_package("test", "fn main() {}");
+    let project = NoirProject::new(root.path().to_path_buf()).expect("project");
+    let (mut passed, mut gaps, mut failures) = (0, Vec::new(), Vec::new());
+    for test in stdlib_tests(&project, FieldId::linked()).expect("frontend") {
+        let outcome = match test.program {
+            Err(error) if matches!(test.scope, TestScope::ShouldFailWith { .. }) => {
+                expected_test_outcome(&test.scope, Some(error.summary().to_string()))
+            }
+            Err(error) => Err(format!("monomorphization: {error}")),
+            Ok(program) => {
+                match panic::catch_unwind(AssertUnwindSafe(|| {
+                    interpret(&program, FieldId::linked())
+                })) {
+                    Err(payload) => Err(format!("panic: {}", panic_message(payload.as_ref()))),
+                    Ok(Err(InterpretError::Unsupported(what)))
+                        if matches!(
+                            what.as_str(),
+                            "intrinsic 'multi_scalar_mul'"
+                                | "intrinsic 'embedded_curve_add'"
+                                | "intrinsic 'poseidon2_permutation'"
+                                | "intrinsic 'derive_pedersen_generators'"
+                        ) =>
+                    {
+                        gaps.push(format!("{}: {what}", test.name));
+                        continue;
+                    }
+                    Ok(result) => stdlib_test_outcome(&test.scope, result),
+                }
+            }
+        };
+        match outcome {
+            Ok(()) => passed += 1,
+            Err(why) => failures.push(format!("{}: {why}", test.name)),
+        }
+    }
+    println!(
+        "stdlib tests under {}: {passed} passed, {} gaps\n{}",
+        FieldId::linked(),
+        gaps.len(),
+        gaps.join("\n")
+    );
+    assert!(passed > 0, "no stdlib tests ran");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Whether a test's result is the one its scope asks for.
+fn stdlib_test_outcome(
+    scope: &TestScope,
+    result: Result<Value, InterpretError>,
+) -> Result<(), String> {
+    let failure = match result {
+        Ok(_) => None,
+        Err(
+            error @ (InterpretError::Type(_)
+            | InterpretError::Internal(_)
+            | InterpretError::Unsupported(_)
+            | InterpretError::InvalidInput(_)),
+        ) => {
+            return Err(error.to_string());
+        }
+        Err(InterpretError::AssertionFailed {
+            message: Some(message),
+            ..
+        }) => Some(message),
+        Err(error) => Some(error.to_string()),
+    };
+    expected_test_outcome(scope, failure)
+}
+
+fn expected_test_outcome(scope: &TestScope, failure: Option<String>) -> Result<(), String> {
+    match (scope, failure) {
+        (TestScope::None, None) | (TestScope::OnlyFailWith { .. }, None) => Ok(()),
+        (TestScope::None, Some(failure)) => Err(failure),
+        (TestScope::ShouldFailWith { .. }, None) => Err("did not fail".to_string()),
+        (TestScope::ShouldFailWith { reason: None }, Some(_)) => Ok(()),
+        (
+            TestScope::ShouldFailWith {
+                reason: Some(reason),
+            },
+            Some(failure),
+        )
+        | (TestScope::OnlyFailWith { reason }, Some(failure)) => {
+            if failure.to_lowercase().contains(&reason.to_lowercase()) {
+                Ok(())
+            } else {
+                Err(format!("failed with {failure:?} rather than {reason:?}"))
+            }
+        }
+    }
+}
+
+#[test]
+fn stdlib_expected_failures_match_noir() {
+    let should_fail = TestScope::ShouldFailWith { reason: None };
+    let reason = TestScope::ShouldFailWith {
+        reason: Some("EXPECTED".into()),
+    };
+    let only = TestScope::OnlyFailWith {
+        reason: "EXPECTED".into(),
+    };
+    for (scope, failure, passes) in [
+        (&TestScope::None, None, true),
+        (&TestScope::None, Some("expected"), false),
+        (&should_fail, None, false),
+        (&should_fail, Some("anything"), true),
+        (&reason, Some("expected failure"), true),
+        (&reason, Some("different failure"), false),
+        (&only, None, true),
+        (&only, Some("expected failure"), true),
+        (&only, Some("different failure"), false),
+    ] {
+        assert_eq!(
+            expected_test_outcome(scope, failure.map(str::to_string)).is_ok(),
+            passes
+        );
+    }
+    for error in [
+        InterpretError::Internal("expected".into()),
+        InterpretError::Type("expected".into()),
+        InterpretError::InvalidInput("expected".into()),
+        InterpretError::Unsupported("intrinsic 'blake3'".into()),
+    ] {
+        assert!(stdlib_test_outcome(&should_fail, Err(error)).is_err());
+    }
+}
 
 /// Run one program through both the interpreter and Noir's executor and classify the comparison.
 /// The executor runs even when the interpreter rejects the program, so a *false rejection* (interp
@@ -843,6 +1020,10 @@ fn oracle_matches_interpreter_smoke() {
         "interp_intrinsic_hints",
         "interp_aggregate_eq",
         "interp_closures",
+        "interp_field_lt",
+        "interp_hash_limbs",
+        "interp_derive_eq_hash",
+        "interp_wrapping_ops",
     ] {
         let result = oracle_compare(&fixture(name));
         assert_eq!(

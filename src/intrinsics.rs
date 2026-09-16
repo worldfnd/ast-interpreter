@@ -1,9 +1,10 @@
-//! Pure, field-independent builtins the AST calls directly: slice ops, length, string<->bytes, and
-//! field decomposition. Field-dependent black-box crypto stays `Unsupported` rather than fabricating
-//! a value that could never be compared across fields.
+//! Field-independent builtins the AST calls directly: slice ops, length, string<->bytes, field
+//! decomposition, and the black boxes over machine words that acvm implements without a field.
 
+use acvm::BlackBoxResolutionError;
+use acvm::blackbox_solver;
 use num_bigint::BigInt;
-use num_traits::Zero;
+use num_traits::{ToPrimitive, Zero};
 
 use noirc_errors::Location;
 use noirc_frontend::monomorphization::ast::Type;
@@ -50,7 +51,18 @@ impl<'p> Interpreter<'p> {
             // `Field::assert_max_bit_size`: assert the value fits in `bit_size` bits, else fail like
             // the range constraint. Field-independent for a bound below both moduli.
             "apply_range_constraint" => apply_range_constraint(&args, location),
-            // Crypto black-boxes, comptime-only meta builtins, refcount ops: a tolerated gap.
+            "field_less_than" => field_less_than(&args),
+            // Black boxes over machine words, with acvm's field-independent implementations.
+            "sha256_compression" => sha256_compression(args),
+            "keccakf1600" => keccakf1600(args),
+            "blake2s" => hash_bytes(args, blackbox_solver::blake2s),
+            "blake3" => hash_bytes(args, blackbox_solver::blake3),
+            "aes128_encrypt" => aes128_encrypt(args),
+            "ecdsa_secp256k1" => ecdsa_verify(args, blackbox_solver::ecdsa_secp256k1_verify),
+            "ecdsa_secp256r1" => ecdsa_verify(args, blackbox_solver::ecdsa_secp256r1_verify),
+            // Printing does not touch the value a program computes.
+            "print" => Ok(Value::Unit),
+            // bn254's crypto black boxes, comptime-only meta builtins, refcount ops.
             other => Err(InterpretError::Unsupported(format!("intrinsic '{other}'"))),
         }
     }
@@ -58,7 +70,7 @@ impl<'p> Interpreter<'p> {
 
 /// Move exactly `N` arguments out of the call (the AST is already type-checked, so a mismatch is
 /// an interpreter bug).
-fn take<const N: usize>(args: Vec<Value>) -> Result<[Value; N], InterpretError> {
+pub(super) fn take<const N: usize>(args: Vec<Value>) -> Result<[Value; N], InterpretError> {
     let len = args.len();
     args.try_into().map_err(|_| {
         InterpretError::Internal(format!(
@@ -67,7 +79,7 @@ fn take<const N: usize>(args: Vec<Value>) -> Result<[Value; N], InterpretError> 
     })
 }
 
-fn into_array(value: Value) -> Result<Vec<Value>, InterpretError> {
+pub(super) fn into_array(value: Value) -> Result<Vec<Value>, InterpretError> {
     match value {
         Value::Array(elements) => Ok(elements),
         other => Err(InterpretError::Type(format!(
@@ -292,7 +304,7 @@ fn static_assert(args: &[Value], location: Location) -> Result<Value, InterpretE
                 Ok(Value::Unit)
             } else {
                 let message = match args.get(1) {
-                    Some(Value::Str(s)) => Some(s.clone()),
+                    Some(Value::Str(s) | Value::LossyStr(s)) => Some(s.clone()),
                     _ => None,
                 };
                 Err(InterpretError::AssertionFailed { location, message })
@@ -329,6 +341,122 @@ fn apply_range_constraint(args: &[Value], location: Location) -> Result<Value, I
         });
     }
     Ok(Value::Unit)
+}
+
+/// `__field_less_than(x, y)`: whether `x < y` as canonical integers in `[0, p)`.
+fn field_less_than(args: &[Value]) -> Result<Value, InterpretError> {
+    match args {
+        [Value::Field(x), Value::Field(y)] => Ok(Value::Bool(x.as_biguint() < y.as_biguint())),
+        _ => Err(InterpretError::Type(format!(
+            "field_less_than expects two fields, got {args:?}"
+        ))),
+    }
+}
+
+/// The elements of an unsigned integer array as machine words of type `T`.
+pub(super) fn words<T: TryFrom<u64>>(value: Value) -> Result<Vec<T>, InterpretError> {
+    into_array(value)?
+        .into_iter()
+        .map(|element| match element {
+            Value::Int(int) if !int.signed => int
+                .value
+                .to_u64()
+                .and_then(|word| T::try_from(word).ok())
+                .ok_or_else(|| {
+                    InterpretError::Type(format!(
+                        "array element {} does not fit the black box's word",
+                        int.value
+                    ))
+                }),
+            other => Err(InterpretError::Type(format!(
+                "expected an unsigned integer array element, got {other:?}"
+            ))),
+        })
+        .collect()
+}
+
+fn fixed<const N: usize, T>(values: Vec<T>, what: &str) -> Result<[T; N], InterpretError> {
+    values
+        .try_into()
+        .map_err(|_| InterpretError::Type(format!("{what} is not {N} elements long")))
+}
+
+fn word_array(words: impl IntoIterator<Item = u64>, bits: u32) -> Value {
+    Value::Array(
+        words
+            .into_iter()
+            .map(|word| Value::Int(IntValue::canonical(false, bits, BigInt::from(word))))
+            .collect(),
+    )
+}
+
+/// Well-typed inputs can still violate a black box's value constraints, such as curve membership.
+pub(super) fn black_box_failure(error: BlackBoxResolutionError) -> InterpretError {
+    InterpretError::ValueOutOfRange(format!("black box: {error}"))
+}
+
+/// `sha256_compression(input, state)`: one compression round over `u32` words.
+fn sha256_compression(args: Vec<Value>) -> Result<Value, InterpretError> {
+    let [input, state] = take(args)?;
+    let input: [u32; 16] = fixed(words(input)?, "sha256 block")?;
+    let mut state: [u32; 8] = fixed(words(state)?, "sha256 state")?;
+    blackbox_solver::sha256_compression(&mut state, &input);
+    Ok(word_array(state.into_iter().map(u64::from), 32))
+}
+
+fn keccakf1600(args: Vec<Value>) -> Result<Value, InterpretError> {
+    let [state] = take(args)?;
+    let state: [u64; 25] = fixed(words(state)?, "keccak state")?;
+    let state = blackbox_solver::keccakf1600(state).map_err(black_box_failure)?;
+    Ok(word_array(state, 64))
+}
+
+/// A 32-byte digest of a byte array.
+fn hash_bytes(
+    args: Vec<Value>,
+    hash: fn(&[u8]) -> Result<[u8; 32], BlackBoxResolutionError>,
+) -> Result<Value, InterpretError> {
+    let [input] = take(args)?;
+    let digest = hash(&words::<u8>(input)?).map_err(black_box_failure)?;
+    Ok(word_array(digest.into_iter().map(u64::from), 8))
+}
+
+/// `aes128_encrypt(input, iv, key)` over an input the stdlib has already padded to whole blocks.
+fn aes128_encrypt(args: Vec<Value>) -> Result<Value, InterpretError> {
+    let [input, iv, key] = take(args)?;
+    let output = blackbox_solver::aes128_encrypt(
+        &words::<u8>(input)?,
+        fixed(words(iv)?, "aes iv")?,
+        fixed(words(key)?, "aes key")?,
+    )
+    .map_err(black_box_failure)?;
+    Ok(word_array(output.into_iter().map(u64::from), 8))
+}
+
+type EcdsaVerify =
+    fn(&[u8; 32], &[u8; 32], &[u8; 32], &[u8; 64]) -> Result<bool, BlackBoxResolutionError>;
+
+/// `ecdsa_*(public_key_x, public_key_y, signature, hashed_message, predicate)`: a false predicate
+/// skips the check and reports the signature valid, as the ACVM does.
+fn ecdsa_verify(args: Vec<Value>, verify: EcdsaVerify) -> Result<Value, InterpretError> {
+    let [
+        public_key_x,
+        public_key_y,
+        signature,
+        hashed_message,
+        predicate,
+    ] = take(args)?;
+    if !predicate.as_bool()? {
+        return Ok(Value::Bool(true));
+    }
+    let valid = verify(
+        &fixed(words(hashed_message)?, "hashed message")?,
+        &fixed(words(public_key_x)?, "public key x")?,
+        &fixed(words(public_key_y)?, "public key y")?,
+        &fixed(words(signature)?, "signature")?,
+    )
+    .map_err(black_box_failure)?;
+    Ok(Value::Bool(valid))
 }
 
 fn arg_u64(args: &[Value], i: usize) -> Result<u64, InterpretError> {

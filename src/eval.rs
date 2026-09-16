@@ -171,7 +171,15 @@ impl<'p> Interpreter<'p> {
             }
 
             Expression::While(while_) => {
-                while self.eval_expr_value(&while_.condition, env)?.as_bool()? {
+                loop {
+                    // A `break` in the condition targets the enclosing loop, not this one.
+                    let condition = match self.eval(&while_.condition, env)? {
+                        Flow::Normal(value) => value.as_bool()?,
+                        flow => return Ok(flow),
+                    };
+                    if !condition {
+                        break;
+                    }
                     match self.eval(&while_.body, env)? {
                         Flow::Break => break,
                         Flow::Continue | Flow::Normal(_) => {}
@@ -217,7 +225,13 @@ impl<'p> Interpreter<'p> {
             }
 
             Expression::Let(let_) => {
-                let value = self.eval_expr_value(&let_.expression, env)?;
+                let value = match self.eval(&let_.expression, env)? {
+                    Flow::Normal(value) if holds_lossy_str(&value) => {
+                        return Err(lossy_string_stored());
+                    }
+                    Flow::Normal(value) => value,
+                    flow => return Ok(flow),
+                };
                 // A `let mut` slot is a shared cell: reads auto-deref, writes store through it.
                 let bound = if let_.mutable {
                     Value::Ref(Rc::new(RefCell::new(value)), true)
@@ -243,7 +257,13 @@ impl<'p> Interpreter<'p> {
             }
 
             Expression::Assign(assign) => {
-                let value = self.eval_expr_value(&assign.expression, env)?;
+                let value = match self.eval(&assign.expression, env)? {
+                    Flow::Normal(value) if holds_lossy_str(&value) => {
+                        return Err(lossy_string_stored());
+                    }
+                    Flow::Normal(value) => value,
+                    flow => return Ok(flow),
+                };
                 self.store(&assign.lvalue, value, env)?;
                 Value::Unit
             }
@@ -385,13 +405,17 @@ impl<'p> Interpreter<'p> {
             }
             Literal::FmtStr(fragments, _count, captures) => {
                 let values = self.eval_fmt_captures(captures, env)?;
-                if values.iter().any(contains_field) {
-                    return Err(InterpretError::Unsupported(
-                        "format string interpolating a field".to_string(),
-                    ));
+                let (types, lossy) = capture_types(captures)?;
+                let text = format_fmt_str(fragments, &values, &types)?;
+                if lossy
+                    || values
+                        .iter()
+                        .any(|value| matches!(value, Value::LossyStr(_)))
+                {
+                    Value::LossyStr(text)
+                } else {
+                    Value::Str(text)
                 }
-                let types = capture_types(captures)?;
-                Value::Str(format_fmt_str(fragments, &values, &types)?)
             }
         };
         Ok(value)
@@ -409,7 +433,10 @@ impl<'p> Interpreter<'p> {
                 Definition::Builtin(name) | Definition::LowLevel(name) => {
                     return Ok(Callee::Intrinsic(name.as_str()));
                 }
-                Definition::Oracle { name, pure: _ } => {
+                Definition::Oracle { name, .. } if name == "print" => {
+                    return Ok(Callee::Intrinsic("print"));
+                }
+                Definition::Oracle { name, .. } => {
                     return Err(InterpretError::Unsupported(format!("oracle call '{name}'")));
                 }
                 Definition::Local(_) | Definition::Global(_) => {}
@@ -426,8 +453,9 @@ impl<'p> Interpreter<'p> {
     fn eval_unary(&self, op: &UnaryOp, rhs: Value) -> Result<Value, InterpretError> {
         match op {
             UnaryOp::Minus => match rhs {
+                // Noir lowers `-x` to `0 - x`, so an overflowing negation reports as a subtraction.
                 Value::Int(int) => Ok(Value::Int(IntValue::checked(
-                    int.signed, int.bits, -int.value, "negation",
+                    int.signed, int.bits, -int.value, "subtract",
                 )?)),
                 Value::Field(field) => Ok(Value::Field(-field)),
                 other => Err(InterpretError::Type(format!("cannot negate {other:?}"))),
@@ -561,8 +589,7 @@ impl<'p> Interpreter<'p> {
         }
     }
 
-    /// Render an assertion's failure message. A format string is rendered even when it interpolates
-    /// a `Field` — the message is triage text, never compared.
+    /// Render an assertion's failure message using its original type metadata when available.
     fn render_assert_message(
         &mut self,
         expr: &'p Expression,
@@ -578,7 +605,7 @@ impl<'p> Interpreter<'p> {
             return format_fmt_str(fragments, &values, &types).ok();
         }
         match self.eval_expr_value(expr, env) {
-            Ok(Value::Str(s)) => Some(s),
+            Ok(Value::Str(s) | Value::LossyStr(s)) => Some(s),
             _ => None,
         }
     }
@@ -878,7 +905,9 @@ fn same_aggregate_shape(a: &Value, b: &Value) -> bool {
     )
 }
 
-fn capture_types(captures: &Expression) -> Result<Vec<PrintableType>, InterpretError> {
+/// The printable types of a format string's captures, and whether formatting them loses a name:
+/// mono tuples also stand for structs and enums, whose names are gone.
+fn capture_types(captures: &Expression) -> Result<(Vec<PrintableType>, bool), InterpretError> {
     let Type::Tuple(types) =
         captures.return_type().as_deref().cloned().ok_or_else(|| {
             InterpretError::Internal("fmt captures have no return type".to_string())
@@ -888,32 +917,50 @@ fn capture_types(captures: &Expression) -> Result<Vec<PrintableType>, InterpretE
             "fmt captures do not have a tuple type".to_string(),
         ));
     };
-    if types.iter().any(type_contains_erased_aggregate) {
-        return Err(InterpretError::Unsupported(
-            "format string interpolating an aggregate with erased type metadata".to_string(),
-        ));
-    }
-    Ok(types.iter().map(printable_type).collect())
+    let lossy = types.iter().any(loses_type_names);
+    Ok((types.iter().map(printable_type).collect(), lossy))
 }
 
-fn type_contains_erased_aggregate(typ: &Type) -> bool {
+fn loses_type_names(typ: &Type) -> bool {
     match typ {
         Type::Tuple(_) => true,
         Type::Array(_, element) | Type::Vector(element) | Type::Reference(element, _) => {
-            type_contains_erased_aggregate(element)
+            loses_type_names(element)
         }
+        // A format string's second parameter is its captures, a tuple by construction.
+        Type::FmtString(_, captures) => match captures.as_ref() {
+            Type::Tuple(types) => types.iter().any(loses_type_names),
+            other => loses_type_names(other),
+        },
         Type::Function(arguments, return_type, environment, _) => {
-            arguments.iter().any(type_contains_erased_aggregate)
-                || type_contains_erased_aggregate(return_type)
-                || type_contains_erased_aggregate(environment)
+            arguments.iter().any(loses_type_names)
+                || loses_type_names(return_type)
+                || loses_type_names(environment)
         }
-        Type::Field
-        | Type::Integer(..)
-        | Type::Bool
-        | Type::String(_)
-        | Type::FmtString(..)
-        | Type::Unit => false,
+        _ => false,
     }
+}
+
+fn holds_lossy_str(value: &Value) -> bool {
+    match value {
+        Value::LossyStr(_) => true,
+        Value::Array(elements) => elements.iter().any(holds_lossy_str),
+        Value::Tuple(cells) => cells.iter().any(|cell| holds_lossy_str(&cell.borrow())),
+        Value::Ref(cell, _) => holds_lossy_str(&cell.borrow()),
+        Value::Field(_)
+        | Value::Int(_)
+        | Value::Bool(_)
+        | Value::Unit
+        | Value::Str(_)
+        | Value::Function(_) => false,
+    }
+}
+
+/// Storing a lossy string would let its wrong text be read back later.
+fn lossy_string_stored() -> InterpretError {
+    InterpretError::Unsupported(
+        "stored format string interpolating an aggregate with erased type metadata".to_string(),
+    )
 }
 
 fn printable_capture_types(typ: PrintableType) -> Option<Vec<PrintableType>> {
@@ -1009,9 +1056,10 @@ fn format_value(value: &Value, typ: &PrintableType) -> Result<String, InterpretE
         (Value::Int(int), PrintableType::SignedInteger { .. })
         | (Value::Int(int), PrintableType::UnsignedInteger { .. }) => Ok(int.value.to_string()),
         (Value::Bool(value), PrintableType::Boolean) => Ok(value.to_string()),
-        (Value::Str(value), PrintableType::String { .. } | PrintableType::FmtString { .. }) => {
-            Ok(value.clone())
-        }
+        (
+            Value::Str(value) | Value::LossyStr(value),
+            PrintableType::String { .. } | PrintableType::FmtString { .. },
+        ) => Ok(value.clone()),
         (Value::Unit, PrintableType::Unit) => Ok("()".to_string()),
         (Value::Array(values), PrintableType::Array { typ, .. }) => {
             format_sequence(values, typ, "[", "]")
@@ -1094,16 +1142,6 @@ fn format_sequence(
         .map(|value| format_value(value, typ))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("{open}{}{close}", values.join(", ")))
-}
-
-fn contains_field(value: &Value) -> bool {
-    match value {
-        Value::Field(_) => true,
-        Value::Array(values) => values.iter().any(contains_field),
-        Value::Tuple(cells) => cells.iter().any(|cell| contains_field(&cell.borrow())),
-        Value::Ref(cell, _) => contains_field(&cell.borrow()),
-        Value::Int(_) | Value::Bool(_) | Value::Unit | Value::Str(_) | Value::Function(_) => false,
-    }
 }
 
 /// Whether `scrutinee` satisfies `constructor`. The tag is the value itself for int/bool/field
@@ -1229,14 +1267,14 @@ pub(crate) fn eval_int_binary(
     let signed = a.signed;
     let bits = a.bits;
     let int = match op {
-        Add => IntValue::checked(signed, bits, a.value + b.value, "addition")?,
-        Subtract => IntValue::checked(signed, bits, a.value - b.value, "subtraction")?,
-        Multiply => IntValue::checked(signed, bits, a.value * b.value, "multiplication")?,
+        Add => IntValue::checked(signed, bits, a.value + b.value, "add")?,
+        Subtract => IntValue::checked(signed, bits, a.value - b.value, "subtract")?,
+        Multiply => IntValue::checked(signed, bits, a.value * b.value, "multiply")?,
         Divide => {
             if b.value.is_zero() {
                 return Err(InterpretError::DivisionByZero);
             }
-            IntValue::checked(signed, bits, a.value / b.value, "division")?
+            IntValue::checked(signed, bits, a.value / b.value, "divide")?
         }
         Modulo => {
             if b.value.is_zero() {
@@ -1246,7 +1284,9 @@ pub(crate) fn eval_int_binary(
             // though the mathematical remainder is 0. Mirror that single edge case.
             let (min, _) = IntValue::range(signed, bits);
             if signed && a.value == min && b.value == -BigInt::from(1) {
-                return Err(InterpretError::Overflow("modulo".to_string()));
+                return Err(InterpretError::Overflow(
+                    "calculate the remainder".to_string(),
+                ));
             }
             IntValue::canonical(signed, bits, a.value % b.value)
         }
@@ -1258,9 +1298,7 @@ pub(crate) fn eval_int_binary(
             // the shift amount must be in range, and the result wraps to the integer width.
             let amount = shift_amount(&b)?;
             if amount >= bits as usize {
-                return Err(InterpretError::Overflow(
-                    "shift-left amount >= bit width".to_string(),
-                ));
+                return Err(InterpretError::Overflow("shift left".to_string()));
             }
             IntValue::canonical(signed, bits, a.unsigned_repr() << amount)
         }
@@ -1270,9 +1308,7 @@ pub(crate) fn eval_int_binary(
             // BigInt shifts toward negative infinity.
             let amount = shift_amount(&b)?;
             if amount >= bits as usize {
-                return Err(InterpretError::Overflow(
-                    "shift-right amount >= bit width".to_string(),
-                ));
+                return Err(InterpretError::Overflow("shift right".to_string()));
             }
             IntValue::canonical(signed, bits, a.value >> amount)
         }
@@ -1287,7 +1323,7 @@ fn shift_amount(b: &IntValue) -> Result<usize, InterpretError> {
     match digits.as_slice() {
         [] => Ok(0),
         [single] => Ok(*single as usize),
-        _ => Err(InterpretError::Overflow("shift amount".to_string())),
+        _ => Err(InterpretError::Overflow("shift".to_string())),
     }
 }
 
@@ -1609,6 +1645,34 @@ mod aggregate_and_fmt_tests {
 
     /// The shapes `renders_assert_message`'s end-to-end string does not already pin: a vector's
     /// `@[..]` prefix and a negative signed integer.
+    #[test]
+    fn erased_aggregate_captures_format_lossily() {
+        let aggregate = Type::Tuple(vec![Type::Field]);
+        for typ in [
+            aggregate.clone(),
+            Type::Array(1, Rc::new(aggregate.clone())),
+            Type::Vector(Rc::new(aggregate)),
+        ] {
+            let captures = Expression::Tuple(vec![Expression::Ident(ident(
+                LocalId(0),
+                "capture",
+                typ,
+                0,
+            ))]);
+            assert!(capture_types(&captures).unwrap().1);
+        }
+        let captures = Expression::Tuple(vec![Expression::Ident(ident(
+            LocalId(0),
+            "capture",
+            Type::Field,
+            0,
+        ))]);
+        assert!(matches!(
+            capture_types(&captures).unwrap(),
+            (types, false) if types == [PrintableType::Field]
+        ));
+    }
+
     #[test]
     fn format_value_uses_noir_display_rules() {
         let i32_type = PrintableType::SignedInteger { width: 32 };
