@@ -1,18 +1,19 @@
-//! Test support for producing a monomorphized Noir AST while tracking dependency diagnostics.
+//! Test support for producing a monomorphized Noir AST.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use acvm::FieldId;
-use fm::{FileId, FileManager};
+use fm::FileManager;
 use nargo::package::Package;
 use noirc_abi::Abi;
 use noirc_errors::CustomDiagnostic;
 use noirc_frontend::debug::DebugInstrumenter;
-use noirc_frontend::graph::CrateId;
 use noirc_frontend::hir::{Context, ParsedFiles};
 use noirc_frontend::monomorphization::Monomorphizer;
 use noirc_frontend::monomorphization::ast::Program;
 use noirc_frontend::monomorphization::debug_types::DebugTypeTracker;
+use noirc_frontend::node_interner::FuncId;
+use sha2::{Digest, Sha256};
 
 /// The package data Noir's [`nargo::prepare_package`] needs.
 pub(crate) trait PackageSource {
@@ -30,38 +31,27 @@ pub(crate) struct Validated {
     pub field_id: FieldId,
 }
 
-/// `summary` is the diagnostic text without spans or file ids; `detail` is the full debug
-/// rendering.
+/// A frontend failure with a stable summary and diagnostic detail.
 #[derive(Debug)]
-pub(crate) enum ValidationError {
-    Compile { summary: String, detail: String },
-    DependencyCompileGap { summary: String, detail: String },
+pub(crate) struct ValidationError {
+    summary: String,
+    detail: String,
 }
 
 impl ValidationError {
-    fn compile(summary: impl Into<String>, detail: impl Into<String>) -> Self {
-        ValidationError::Compile {
+    fn new(summary: impl Into<String>, detail: impl Into<String>) -> Self {
+        ValidationError {
             summary: summary.into(),
             detail: detail.into(),
         }
     }
 
     pub(crate) fn summary(&self) -> &str {
-        match self {
-            ValidationError::Compile { summary, .. }
-            | ValidationError::DependencyCompileGap { summary, .. } => summary,
-        }
+        &self.summary
     }
 
     pub(crate) fn detail(&self) -> &str {
-        match self {
-            ValidationError::Compile { detail, .. }
-            | ValidationError::DependencyCompileGap { detail, .. } => detail,
-        }
-    }
-
-    pub(crate) fn is_dependency_compile_gap(&self) -> bool {
-        matches!(self, ValidationError::DependencyCompileGap { .. })
+        &self.detail
     }
 }
 
@@ -73,44 +63,71 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// The messages of the error and bug diagnostics in `diagnostics`, joined into one line.
+/// Bound displayed diagnostics when a dependency produces thousands of errors.
+const RECORDED_DIAGNOSTICS: usize = 8;
+
+/// Abbreviate long summaries while retaining a fingerprint of every error message.
 fn diagnostic_summary(diagnostics: &[CustomDiagnostic]) -> String {
     let messages: Vec<&str> = diagnostics
         .iter()
         .filter(|d| d.is_error() || d.is_bug())
         .map(|d| d.message.as_str())
         .collect();
-    messages.join(" | ")
+    let mut summary = messages[..messages.len().min(RECORDED_DIAGNOSTICS)].join(" | ");
+    if messages.len() > RECORDED_DIAGNOSTICS {
+        let full_summary = super::diff::normalize_text(&messages.join(" | "));
+        summary.push_str(&format!(
+            " | ... and {} more (sha256={:x})",
+            messages.len() - RECORDED_DIAGNOSTICS,
+            Sha256::digest(full_summary.as_bytes())
+        ));
+    }
+    summary
 }
 
-/// Run the Noir frontend through monomorphization and return the mono-AST + ABI.
-///
-/// Under non-BN254 fields, dependency-only elaboration errors are tolerated if no rejected code
-/// reaches the monomorphized program.
-pub(crate) fn compile_for_validation(
-    source: &impl PackageSource,
+fn diagnostic_detail(diagnostics: &[CustomDiagnostic]) -> String {
+    let shown = &diagnostics[..diagnostics.len().min(RECORDED_DIAGNOSTICS)];
+    let mut detail = format!("Noir compiler error: {shown:?}");
+    if diagnostics.len() > RECORDED_DIAGNOSTICS {
+        detail.push_str(&format!(
+            " ... and {} more",
+            diagnostics.len() - RECORDED_DIAGNOSTICS
+        ));
+    }
+    detail
+}
+
+/// Prepare `source` and run the frontend on it under `field`, rejecting every error whichever
+/// file it lands in.
+fn check_package<'s>(
+    source: &'s impl PackageSource,
     field: FieldId,
-) -> Result<Validated, ValidationError> {
+) -> Result<Context<'s, 's>, ValidationError> {
     let (mut context, crate_id) = nargo::prepare_package(
         source.file_manager(),
         source.parsed_files(),
         source.get_only_crate(),
     );
-
     let options = noirc_driver::CompileOptions {
         field,
         ..noirc_driver::CompileOptions::default()
     };
-    let check_result = noirc_driver::check_crate(&mut context, crate_id, &options);
-    let tolerated_files =
-        tolerated_dependency_error_files(&context, crate_id, check_result, field)?;
+    noirc_driver::check_crate(&mut context, crate_id, &options).map_err(|diagnostics| {
+        ValidationError::new(
+            diagnostic_summary(&diagnostics),
+            diagnostic_detail(&diagnostics),
+        )
+    })?;
+    Ok(context)
+}
 
-    let main = context
-        .get_main_function(context.root_crate_id())
-        .ok_or_else(|| {
-            let message = "expected a `main` function to validate";
-            ValidationError::compile(message, message)
-        })?;
+/// Monomorphize `entry` out of a checked crate. The output carries the field it was compiled
+/// under, which must be the one asked for.
+fn monomorphize(
+    context: &mut Context,
+    entry: FuncId,
+    field: FieldId,
+) -> Result<(Program, FieldId), ValidationError> {
     let debug_type_tracker =
         DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
     // Match Noir's non-debug monomorphization entry point.
@@ -122,71 +139,44 @@ pub(crate) fn compile_for_validation(
         false,
     );
     monomorphizer
-        .compile_main(main)
+        .compile_main(entry)
         .map_err(monomorphization_error)?;
     monomorphizer
         .process_queue()
         .map_err(monomorphization_error)?;
     let output = monomorphizer.into_output();
-    reject_code_from_tolerated_files(
-        &context.file_manager,
-        &output.monomorphized_source_files,
-        &tolerated_files,
-    )?;
-    let program = output.program;
-
     assert_eq!(
         output.field_id, field,
         "ICE: asked for a {field} program and got a {} one",
         output.field_id
     );
+    Ok((output.program, output.field_id))
+}
 
+/// Produce the mono-AST and ABI of `main`.
+pub(crate) fn compile_for_validation(
+    source: &impl PackageSource,
+    field: FieldId,
+) -> Result<Validated, ValidationError> {
+    let mut context = check_package(source, field)?;
+    let main = context
+        .get_main_function(context.root_crate_id())
+        .ok_or_else(|| {
+            let message = "expected a `main` function to validate";
+            ValidationError::new(message, message)
+        })?;
+    let (program, field_id) = monomorphize(&mut context, main, field)?;
     let abi = noirc_driver::gen_abi(
         &context,
         &main,
         program.return_visibility(),
         BTreeMap::default(),
     );
-
     Ok(Validated {
         program,
         abi,
-        field_id: output.field_id,
+        field_id,
     })
-}
-
-/// Return dependency files with tolerated diagnostics. Package diagnostics remain fatal, and
-/// callers must reject monomorphized code originating from a tolerated file.
-///
-/// Non-BN254 compilations encounter errors in stdlib code that is not yet gated by field.
-fn tolerated_dependency_error_files(
-    context: &Context,
-    crate_id: CrateId,
-    check_result: noirc_driver::CompilationResult<()>,
-    field: FieldId,
-) -> Result<BTreeSet<FileId>, ValidationError> {
-    match check_result {
-        Ok(_) => Ok(BTreeSet::new()),
-        Err(diagnostics) if field != FieldId::Bn254 => {
-            let package_files = context.crate_files(&crate_id);
-            // Track dependency ICEs too; proceeding past an untracked ICE is unsound.
-            let (package_errors, tolerated): (Vec<_>, Vec<_>) = diagnostics
-                .into_iter()
-                .filter(|d| d.is_error() || d.is_bug())
-                .partition(|d| package_files.contains(&d.file));
-            if !package_errors.is_empty() {
-                return Err(ValidationError::compile(
-                    diagnostic_summary(&package_errors),
-                    format!("Noir compiler error: {package_errors:?}"),
-                ));
-            }
-            Ok(tolerated.into_iter().map(|d| d.file).collect())
-        }
-        Err(diagnostics) => Err(ValidationError::compile(
-            diagnostic_summary(&diagnostics),
-            format!("Noir compiler error: {diagnostics:?}"),
-        )),
-    }
 }
 
 fn monomorphization_error(
@@ -194,35 +184,21 @@ fn monomorphization_error(
 ) -> ValidationError {
     let detail = format!("{error:?}");
     let summary = CustomDiagnostic::from(error).message;
-    ValidationError::compile(summary, detail)
+    ValidationError::new(summary, detail)
 }
 
-/// Reject monomorphized code from dependencies whose diagnostics were tolerated. Constants folded
-/// during elaboration remain outside this provenance check.
-fn reject_code_from_tolerated_files(
-    file_manager: &FileManager,
-    monomorphized_source_files: &BTreeSet<FileId>,
-    tolerated: &BTreeSet<FileId>,
-) -> Result<(), ValidationError> {
-    let mut poisoned: Vec<String> = monomorphized_source_files
-        .intersection(tolerated)
-        .map(|id| {
-            file_manager
-                .path(*id)
-                .map_or_else(|| format!("{id:?}"), |p| p.display().to_string())
-        })
-        .collect();
-    poisoned.sort();
-    if poisoned.is_empty() {
-        return Ok(());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_diagnostics_still_distinguish_later_errors() {
+        let mut diagnostics = vec![
+            CustomDiagnostic::from_message("type error", Default::default());
+            RECORDED_DIAGNOSTICS + 1
+        ];
+        let before = diagnostic_summary(&diagnostics);
+        diagnostics.last_mut().unwrap().message = "unresolved name".into();
+        assert_ne!(before, diagnostic_summary(&diagnostics));
     }
-    let message = format!(
-        "program reaches dependency code from files that failed elaboration under the chosen \
-         field: {}",
-        poisoned.join(", ")
-    );
-    Err(ValidationError::DependencyCompileGap {
-        summary: message.clone(),
-        detail: message,
-    })
 }

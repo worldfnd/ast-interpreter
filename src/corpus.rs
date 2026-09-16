@@ -307,12 +307,7 @@ fn run_step<T>(
 }
 
 pub(crate) fn compile_error_of(error: &ValidationError) -> ComparableError {
-    let kind = if error.is_dependency_compile_gap() {
-        FailureKind::DependencyCompileGap
-    } else {
-        FailureKind::CompileError
-    };
-    ComparableError::new(kind, normalize_text(error.summary()))
+    ComparableError::new(FailureKind::CompileError, normalize_text(error.summary()))
 }
 
 fn interpret_failure(error: &InterpretError) -> (ComparableError, String) {

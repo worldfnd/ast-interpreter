@@ -14,7 +14,7 @@ use noirc_printable_type::PrintableType;
 use sha2::{Digest, Sha256};
 
 /// The projection's format version; part of every dump and of `STATUS.md`.
-pub const PROJECTION_VERSION: u32 = 2;
+pub const PROJECTION_VERSION: u32 = 3;
 
 /// The SHA-256 of [`canonical_text`], as lowercase hex.
 pub fn projection_hash(program: &Program) -> String {
@@ -491,7 +491,7 @@ mod tests {
     use std::rc::Rc;
 
     use noirc_errors::{Location, Span};
-    use noirc_frontend::ast::{BinaryOpKind, IntegerBitSize};
+    use noirc_frontend::ast::BinaryOpKind;
     use noirc_frontend::monomorphization::ast::{Binary, Call, Ident, IdentId, InlineType, Type};
     use noirc_frontend::shared::{Signedness, Visibility};
     use num_bigint::BigInt;
@@ -499,7 +499,7 @@ mod tests {
     use super::*;
 
     fn u64_type() -> Type {
-        Type::Integer(Signedness::Unsigned, IntegerBitSize::SixtyFour)
+        Type::Integer(Signedness::Unsigned, 64)
     }
 
     fn location(offset: u32) -> Location {
@@ -737,11 +737,11 @@ mod tests {
         let program = program(vec![function(0, "main", &[(4, "x")], int(7, 0))]);
         assert_eq!(
             canonical_text(&program),
-            "(program v2\n \
+            "(program v3\n \
              (fn f#0 \"main\" unconstrained=false inline=inline entry=true allow_constant_return=false visibility=Public\n  \
-             (params (l#0 mut=false \"x\" Integer(Unsigned, SixtyFour) Private))\n  \
-             -> Integer(Unsigned, SixtyFour)\n  \
-             (int 7 Integer(Unsigned, SixtyFour)))\n\
+             (params (l#0 mut=false \"x\" Integer(Unsigned, 64) Private))\n  \
+             -> Integer(Unsigned, 64)\n  \
+             (int 7 Integer(Unsigned, 64)))\n\
              )\n"
         );
     }
