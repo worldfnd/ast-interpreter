@@ -1,0 +1,6 @@
+[package]
+name = "neg_wide_input_u66"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -36,6 +36,32 @@ fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(interpret(&validated.program, validated.field_id)?)
 }
 
+fn assert_fixture_return(name: &str, expected: Value) {
+    let root = fixture(name);
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project, FieldId::linked())
+        .unwrap_or_else(|error| panic!("{name}: frontend: {error}"));
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .unwrap_or_else(|error| panic!("{name}: inputs: {error}"));
+    let result = interpret_with_inputs(&validated.program, inputs, validated.field_id)
+        .unwrap_or_else(|error| panic!("{name}: interpret: {error}"));
+    let recorded = expected_return_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .unwrap_or_else(|error| panic!("{name}: recorded return: {error}"));
+    assert_eq!(result, expected, "{name}");
+    assert_eq!(recorded, Some(expected), "{name}: recorded return");
+}
+
 fn compile_source(source: &str, field: FieldId) -> Validated {
     let root = temp_noir_package("test", source);
     let project = NoirProject::new(root.path().to_path_buf()).expect("project");
@@ -614,6 +640,68 @@ fn validates_goldilocks_mono_ast_u64() {
     assert_eq!(
         result, expected,
         "Goldilocks mono-AST must carry p+1 exactly and compute the native u64 result"
+    );
+}
+
+#[test]
+fn interprets_wide_integers() {
+    for bits in [34u32, 36, 66, 126, 128] {
+        assert_fixture_return(
+            &format!("interp_width_{bits}"),
+            Value::Int(IntValue::canonical(false, bits, BigInt::from(16))),
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_integer_widths() {
+    for (name, needle) in [
+        ("width_odd", "`u33` is not a supported integer type"),
+        ("width_gap", "`u10` is not a supported integer type"),
+        (
+            "width_above_max",
+            "`u65538` is not a supported integer type",
+        ),
+        ("width_unresolved", "Could not resolve 'N' in path"),
+    ] {
+        let project = NoirProject::new(negative_fixture(name)).expect("project");
+        let error = match compile_for_validation(&project, FieldId::linked()) {
+            Ok(_) => panic!("{name}: validation accepted an invalid width"),
+            Err(error) => error,
+        };
+        assert!(
+            error.summary().contains(needle),
+            "{name}: {}",
+            error.summary()
+        );
+    }
+}
+
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn bn254_accepts_input_above_the_goldilocks_modulus() {
+    assert_fixture_return(
+        "neg_wide_input_u66",
+        Value::Int(IntValue::canonical(false, 66, BigInt::from(1u8) << 65usize)),
+    );
+}
+
+#[cfg(feature = "goldilocks")]
+#[test]
+fn goldilocks_rejects_input_above_its_modulus() {
+    let root = fixture("neg_wide_input_u66");
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    );
+    assert!(
+        matches!(inputs, Err(InterpretError::InvalidInput(_))),
+        "{inputs:?}"
     );
 }
 
