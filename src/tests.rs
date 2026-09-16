@@ -202,7 +202,6 @@ fn interprets_casts_above_the_modulus() {
 }
 
 /// A false (non-const-folded) assertion interprets to `AssertionFailed`, not a clean pass.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn detects_false_assertion() {
     let project = NoirProject::new(negative_fixture("assert_fail")).expect("project");
@@ -213,62 +212,10 @@ fn detects_false_assertion() {
     }
 }
 
-/// A type error in code `main` *reaches* must be rejected, not silently monomorphized. A clean
-/// `Ok(())` is the hole we guard against; a monomorphizer panic on the `Error` node also counts.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn rejects_reachable_type_error() {
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let project = NoirProject::new(negative_fixture("reachable_error")).expect("project");
-        compile_for_validation(&project, FieldId::linked()).map(|_| ())
-    }));
-    match outcome {
-        Ok(Err(_)) => {} // rejected cleanly — desired
-        Err(_) => {}     // monomorphizer panicked on the Error node — also a rejection
-        Ok(Ok(())) => panic!(
-            "reachable type error was silently accepted: the validation frontend produced a \
-             mono-AST for un-type-checkable reachable code — oracle false-confidence hole"
-        ),
-    }
-}
-
-/// Reached dependency code with tolerated diagnostics must be rejected before interpretation.
-#[cfg(feature = "goldilocks")]
-#[test]
-fn rejects_reached_dependency_error() {
-    let project = NoirProject::new(fixture("interp_reached_dep_error")).expect("project");
-    let err = match compile_for_validation(&project, FieldId::linked()) {
-        Ok(_) => panic!(
-            "a program reaching code from a tolerated-error file must be rejected, not validated"
-        ),
-        Err(e) => e,
-    };
-    assert!(
-        err.is_dependency_compile_gap(),
-        "expected the tolerated-file invariant rejection, got: {err}"
-    );
-}
-
-/// The same dependency fixture compiles and interprets under bn254.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_reached_dep_fixture_on_bn254() {
-    let project = NoirProject::new(fixture("interp_reached_dep_error")).expect("project");
-    let validated =
-        compile_for_validation(&project, FieldId::linked()).expect("clean compile under bn254");
-    let x = Value::Int(IntValue {
-        signed: false,
-        bits: 32,
-        value: BigInt::from(3u32),
-    });
-    let result =
-        interpret_with_inputs(&validated.program, vec![x], validated.field_id).expect("interpret");
-    let expected = Value::Int(IntValue {
-        signed: false,
-        bits: 32,
-        value: BigInt::from(2u32),
-    });
-    assert_eq!(result, expected);
+    let project = NoirProject::new(negative_fixture("reachable_error")).expect("project");
+    assert!(compile_for_validation(&project, FieldId::linked()).is_err());
 }
 
 /// The `Prover.toml` input bridge: `interp_inputs_u64` with `x = 3` computes `x*2 + (p+1)` in u64.
@@ -555,7 +502,6 @@ fn interprets_integer_match() {
     assert_eq!(run(-2), i32v(100), "negative literal case");
 }
 
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn renders_assert_message() {
     let project = NoirProject::new(negative_fixture("assert_fmt_msg")).expect("project");
@@ -678,9 +624,8 @@ fn validates_goldilocks_mono_ast_u64() {
 /// The executor runs even when the interpreter rejects the program, so a *false rejection* (interp
 /// errors on something nargo runs fine) is caught, not hidden. Buckets: `"agree"`,
 /// `"FALSE-REJECTION: ..."`, `"MISMATCH: ..."`, `"oracle-wrong: ..."`, `"interp-unsupported: ..."`
-/// (tolerated gap), `"interp-panic: ..."` (always an interpreter bug, never folded into
-/// `both-errored`), `"oracle-errored"`, `"both-errored"`. Under goldilocks the executor can't
-/// elaborate the bn254 stdlib, so comparisons stay vacuous.
+/// (tolerated gap), `"interp-panic: ..."`, `"interp-internal: ..."` (both always failures),
+/// `"oracle-errored"`, `"both-errored"`.
 fn oracle_compare(program_dir: &Path) -> String {
     use super::noir_oracle::noir_execute_return;
 
@@ -728,6 +673,7 @@ fn oracle_compare(program_dir: &Path) -> String {
 
     match (interp, executor_ok) {
         (Err((FailureKind::Panic, detail)), _) => format!("interp-panic: {detail}"),
+        (Err((FailureKind::Internal, detail)), _) => format!("interp-internal: {detail}"),
         (Err((FailureKind::Unsupported { construct }, _)), Some(_)) => {
             format!("interp-unsupported: {construct}")
         }
@@ -784,8 +730,7 @@ fn oracle_compare(program_dir: &Path) -> String {
     }
 }
 
-/// The interpreter and Noir's ACVM executor agree on the in-crate fixtures. bn254 only — under
-/// goldilocks the executor cannot compile them yet.
+/// Compare the fixtures supported by the BN254 executor with the interpreter.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn oracle_matches_interpreter_smoke() {
@@ -820,7 +765,8 @@ fn oracle_matches_interpreter_smoke() {
 }
 
 /// Differential survey: run the whole `execution_success` corpus through the interpreter and
-/// Noir's executor and fail on any `MISMATCH` or `FALSE-REJECTION`. Tolerated `interp-unsupported`
+/// Noir's executor and fail on mismatches, false rejections, panics or internal errors.
+/// Tolerated `interp-unsupported`
 /// is counted, not failed. `#[ignore]`d and needs a big stack:
 ///   RUST_MIN_STACK=1073741824 cargo test --lib \
 ///       tests::oracle_survey_execution_success -- --ignored --nocapture
@@ -846,7 +792,15 @@ fn oracle_survey_execution_success() {
             .trim()
             .to_string();
         *buckets.entry(bucket).or_default() += 1;
-        if result.starts_with("MISMATCH") || result.starts_with("FALSE-REJECTION") {
+        if [
+            "MISMATCH",
+            "FALSE-REJECTION",
+            "interp-panic",
+            "interp-internal",
+        ]
+        .iter()
+        .any(|prefix| result.starts_with(prefix))
+        {
             failures.push(format!("{name}: {result}"));
         }
     }
@@ -862,7 +816,7 @@ fn oracle_survey_execution_success() {
     }
     assert!(
         failures.is_empty(),
-        "{} interpreter/executor failure(s) found (MISMATCH or FALSE-REJECTION)",
+        "{} interpreter/executor failure(s) found",
         failures.len()
     );
 }

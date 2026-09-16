@@ -174,7 +174,7 @@ pub(crate) fn value_from_input(
             Ok(Value::Field(FieldValue::from_linked_element(*field)))
         }
         (InputValue::Field(field), Type::Integer(signedness, bits)) => {
-            let width = u32::from(bits.bit_size());
+            let width = *bits;
             let raw = FieldValue::from_linked_element(*field).to_bigint();
             // Guards values the parser never saw: the executor oracle decodes ACVM returns here.
             if raw.bits() > u64::from(width) {

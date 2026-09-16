@@ -352,11 +352,7 @@ impl<'p> Interpreter<'p> {
                     let signed = signedness.is_signed();
                     // `canonical` wraps the mathematical value into the type's range (identity for a
                     // well-formed literal).
-                    Value::Int(IntValue::canonical(
-                        signed,
-                        u32::from(bits.bit_size()),
-                        value.clone(),
-                    ))
+                    Value::Int(IntValue::canonical(signed, *bits, value.clone()))
                 }
                 other => {
                     return Err(InterpretError::Type(format!(
@@ -539,7 +535,7 @@ impl<'p> Interpreter<'p> {
             },
             Type::Integer(signedness, bits) => {
                 let signed = signedness.is_signed();
-                let width = u32::from(bits.bit_size());
+                let width = *bits;
                 let raw = match value {
                     Value::Int(int) => int.value,
                     Value::Bool(b) => BigInt::from(b as u8),
@@ -935,12 +931,10 @@ fn printable_type(typ: &Type) -> PrintableType {
             length: *length,
             typ: Box::new(printable_type(element)),
         },
-        Type::Integer(signedness, bits) if signedness.is_signed() => PrintableType::SignedInteger {
-            width: bits.bit_size().into(),
-        },
-        Type::Integer(_, bits) => PrintableType::UnsignedInteger {
-            width: bits.bit_size().into(),
-        },
+        Type::Integer(signedness, bits) if signedness.is_signed() => {
+            PrintableType::SignedInteger { width: *bits }
+        }
+        Type::Integer(_, bits) => PrintableType::UnsignedInteger { width: *bits },
         Type::Bool => PrintableType::Boolean,
         Type::String(length) => PrintableType::String { length: *length },
         Type::FmtString(length, captures) => PrintableType::FmtString {
@@ -1299,9 +1293,7 @@ fn shift_amount(b: &IntValue) -> Result<usize, InterpretError> {
 
 fn int_type(typ: &Type) -> Option<(bool, u32)> {
     match typ {
-        Type::Integer(signedness, bits) => {
-            Some((signedness.is_signed(), u32::from(bits.bit_size())))
-        }
+        Type::Integer(signedness, bits) => Some((signedness.is_signed(), *bits)),
         _ => None,
     }
 }
@@ -1488,7 +1480,6 @@ mod semantics_tests {
 #[cfg(test)]
 mod aggregate_and_fmt_tests {
     use super::*;
-    use noirc_frontend::ast::IntegerBitSize;
     use noirc_frontend::monomorphization::ast::{Assign, Ident, IdentId, LocalId, Program};
     use noirc_frontend::shared::Signedness;
 
@@ -1569,7 +1560,7 @@ mod aggregate_and_fmt_tests {
 
     #[test]
     fn nested_lvalue_indices_evaluate_inner_first() {
-        let u32_type = Type::Integer(Signedness::Unsigned, IntegerBitSize::ThirtyTwo);
+        let u32_type = Type::Integer(Signedness::Unsigned, 32);
         let row_type = Type::Array(2, Rc::new(u32_type.clone()));
         let array_type = Type::Array(2, Rc::new(row_type.clone()));
         let array_local = LocalId(0);

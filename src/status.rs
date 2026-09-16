@@ -127,8 +127,6 @@ enum Verdict {
     PredictedGap,
     /// A divergence or gap the allowlist records as field-dependent by design.
     FieldDependent,
-    /// One side reaches stdlib code that does not elaborate under its field.
-    DependencyGap,
     /// Neither side ran the program: interpreter coverage debt.
     CoverageGap,
     /// One side cannot run the program and nothing predicts it.
@@ -146,7 +144,6 @@ impl fmt::Display for Verdict {
             Verdict::EqualModuloField => "✅ equal*",
             Verdict::PredictedGap => "🟡 predicted",
             Verdict::FieldDependent => "🟡 field-dependent",
-            Verdict::DependencyGap => "🟡 dependency",
             Verdict::CoverageGap => "🟡 both-sides",
             Verdict::UnexpectedGap => "⚠️ unexpected",
             Verdict::Divergence => "❌ divergence",
@@ -212,17 +209,8 @@ fn classify(name: &str, a: &DiffOutcome, b: &DiffOutcome, sides: &Sides) -> Verd
             if gap_a && gap_b {
                 return Verdict::CoverageGap;
             }
-            let (gap, other, field) = if gap_a {
-                (a, b, sides.a)
-            } else {
-                (b, a, sides.b)
-            };
-            let DiffOutcome::Errored { error, .. } = gap else {
-                unreachable!("a coverage gap is an errored outcome");
-            };
-            if error.kind == FailureKind::DependencyCompileGap {
-                Verdict::DependencyGap
-            } else if predicted_gap(name, field) {
+            let (other, field) = if gap_a { (b, sides.a) } else { (a, sides.b) };
+            if predicted_gap(name, field) {
                 Verdict::PredictedGap
             } else if !matches!(other, DiffOutcome::Returned(_)) {
                 Verdict::CoverageGap
@@ -344,9 +332,8 @@ fn render_status(provenance: &DumpProvenance, rows: &[Row]) -> String {
          `Prover.toml` (exact under bn254; `Field` values ignored under goldilocks, whose corpus \
          records bn254 values): ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two sides: \
          `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field \
-         property the program's inputs, recorded return or casts need; `field-dependent`, allowlisted as \
-         field-dependent by design; `dependency`, one side reaches stdlib code that does not \
-         elaborate under its field; `both-sides`, neither side ran it; `unexpected`, a one-sided \
+         property the program's inputs, recorded return or casts need; `field-dependent`, \
+         allowlisted as field-dependent by design; `both-sides`, neither side ran it; `unexpected`, a one-sided \
          gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest. \
          `AST` says whether both monomorphized programs project to the same hash. `Record` \
          fingerprints the row's underlying records, so any change shows here even when the glyphs \
@@ -410,7 +397,6 @@ fn render_status(provenance: &DumpProvenance, rows: &[Row]) -> String {
         Verdict::EqualModuloField,
         Verdict::PredictedGap,
         Verdict::FieldDependent,
-        Verdict::DependencyGap,
         Verdict::CoverageGap,
         Verdict::UnexpectedGap,
         Verdict::Divergence,
@@ -742,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn gaps_beside_errors_dependency_gaps_and_two_sided_gaps_are_named() {
+    fn gaps_beside_errors_and_two_sided_gaps_are_named() {
         assert_eq!(
             verdict(
                 "p",
@@ -750,14 +736,6 @@ mod tests {
                 &errored(FailureKind::CompileError, "no impl")
             ),
             Verdict::CoverageGap
-        );
-        assert_eq!(
-            verdict(
-                "p",
-                &returned("1"),
-                &errored(FailureKind::DependencyCompileGap, "std/field/mod.nr")
-            ),
-            Verdict::DependencyGap
         );
         assert_eq!(
             verdict("p", &unsupported("intrinsic"), &unsupported("oracle call")),
