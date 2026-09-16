@@ -62,6 +62,10 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         "fixtures/neg_interp_inputs_i64",
         &[Capability::SignedFits(64)],
     ),
+    (
+        "fixtures/neg_wide_input_u66",
+        &[Capability::UnsignedFits(66)],
+    ),
 ];
 
 /// Programs whose divergence is field-dependent by design. An entry whose row is not
@@ -99,6 +103,12 @@ const PROJECTION_INVARIANT_FIXTURES: &[&str] = &[
     "interp_match_enum",
     "interp_match_int",
     "interp_casts_above_modulus",
+    "interp_width_34",
+    "interp_width_36",
+    "interp_width_66",
+    "interp_width_126",
+    "interp_width_128",
+    "neg_wide_input_u66",
 ];
 
 fn is_allowlisted(name: &str) -> bool {

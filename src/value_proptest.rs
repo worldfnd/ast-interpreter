@@ -13,25 +13,19 @@ use crate::error::InterpretError;
 use crate::eval::eval_int_binary;
 use crate::value::{IntValue, Value, wrap};
 
-/// Noir widths plus the planned arbitrary-width carrier cases.
+const WIDTHS: &[u32] = &[8, 16, 32, 34, 36, 64, 66, 126, 128, 256, 65536];
+
 fn width() -> impl Strategy<Value = u32> {
-    proptest::sample::select(vec![8, 16, 32, 34, 64, 66, 128, 256, 65536])
+    proptest::sample::select(WIDTHS)
 }
 
-/// The smallest width in [`width`] strictly greater than `bits` (saturating at the 65536-bit max).
-/// Used so the cast round-trip exercises genuine widening instead of collapsing to a same-width
-/// no-op.
+/// The next sampled width, saturating at the maximum.
 fn wider_than(bits: u32) -> u32 {
-    match bits {
-        8 => 16,
-        16 => 32,
-        32 => 34,
-        34 => 64,
-        64 => 66,
-        66 => 128,
-        128 => 256,
-        _ => 65536,
-    }
+    WIDTHS
+        .iter()
+        .copied()
+        .find(|&width| width > bits)
+        .unwrap_or(bits)
 }
 
 /// An integer *type*: signedness paired with one of the supported widths.
@@ -143,11 +137,11 @@ proptest! {
     fn p3b_in_range_shifts(
         (signed, bits) in int_type(),
         (mag, neg) in (any::<u128>(), any::<bool>()),
-        amt_seed in any::<u8>(),
+        amt_seed in any::<u32>(),
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(signed, bits, raw);
-        let amount = usize::from(amt_seed) % (bits as usize);
+        let amount = (amt_seed % bits) as usize;
         let b = IntValue::canonical(signed, bits, BigInt::from(amount));
 
         // Capture independent references BEFORE the operands are moved into `eval_int_binary`.
@@ -243,7 +237,7 @@ fn div_and_mod_by_zero_error() {
 /// matching Rust's checked `div`/`rem`.
 #[test]
 fn signed_min_div_mod_neg_one_overflow() {
-    for bits in [8u32, 16, 32, 64, 128] {
+    for &bits in WIDTHS {
         let (min, _) = IntValue::range(true, bits);
         let a = IntValue::canonical(true, bits, min);
         let neg_one = IntValue::canonical(true, bits, -BigInt::from(1));

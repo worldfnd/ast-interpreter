@@ -1,0 +1,6 @@
+[package]
+name = "neg_width_odd"
+type = "bin"
+authors = [""]
+
+[dependencies]
