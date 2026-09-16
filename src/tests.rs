@@ -756,7 +756,7 @@ fn goldilocks_rejects_input_above_its_modulus() {
 // --- Differential oracle: interpreter vs Noir's own ACVM/Brillig executor (see `noir_oracle.rs`).
 // Two independent lowerings (tree-walk vs full ACIR compile+execute) must agree on the return. ---
 
-/// Run every argument-less stdlib test; bn254's crypto black boxes are the only coverage gap.
+/// Run every argument-less stdlib test; only explicitly disabled crypto is a coverage gap.
 #[test]
 fn the_stdlib_tests_pass_under_the_linked_field() {
     let root = temp_noir_package("test", "fn main() {}");
@@ -774,13 +774,14 @@ fn the_stdlib_tests_pass_under_the_linked_field() {
                 })) {
                     Err(payload) => Err(format!("panic: {}", panic_message(payload.as_ref()))),
                     Ok(Err(InterpretError::Unsupported(what)))
-                        if matches!(
-                            what.as_str(),
-                            "intrinsic 'multi_scalar_mul'"
-                                | "intrinsic 'embedded_curve_add'"
-                                | "intrinsic 'poseidon2_permutation'"
-                                | "intrinsic 'derive_pedersen_generators'"
-                        ) =>
+                        if !cfg!(feature = "bn254-crypto")
+                            && matches!(
+                                what.as_str(),
+                                "intrinsic 'multi_scalar_mul'"
+                                    | "intrinsic 'embedded_curve_add'"
+                                    | "intrinsic 'poseidon2_permutation'"
+                                    | "intrinsic 'derive_pedersen_generators'"
+                            ) =>
                     {
                         gaps.push(format!("{}: {what}", test.name));
                         continue;

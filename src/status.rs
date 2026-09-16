@@ -36,15 +36,38 @@ fn dump_path(tag: &str) -> PathBuf {
     dump_dir().join(format!("{tag}.json"))
 }
 
-/// Programs whose inputs, recorded return or casts to `Field` need a field property; a side whose
-/// field lacks it cannot run them. An input is tagged only when its values do not fit. An entry
-/// whose row is not `predicted` is stale.
+/// Programs whose inputs, recorded return, constants or casts to `Field` need a field property; a
+/// side whose field lacks it cannot run them. An input is tagged only when its values do not fit.
+/// An entry whose row is not `predicted` is stale.
 const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
+    ("bench_2_to_17", &[Capability::FieldBitsAtLeast(254)]),
     ("bit_shifts_runtime", &[Capability::SignedFits(64)]),
     ("bit_shifts_u128", &[Capability::UnsignedFits(128)]),
+    ("fold_2_to_17", &[Capability::FieldBitsAtLeast(254)]),
+    (
+        "fold_numeric_generic_poseidon",
+        &[Capability::FieldBitsAtLeast(254)],
+    ),
+    (
+        "no_predicates_numeric_generic_poseidon",
+        &[Capability::FieldBitsAtLeast(254)],
+    ),
+    (
+        "poseidon_bn254_hash_width_3",
+        &[Capability::FieldBitsAtLeast(254)],
+    ),
+    (
+        "poseidonsponge_x5_254",
+        &[Capability::FieldBitsAtLeast(254)],
+    ),
+    ("regression_10180", &[Capability::FieldBitsAtLeast(254)]),
+    ("regression_5252", &[Capability::FieldBitsAtLeast(254)]),
+    ("regression_5615", &[Capability::FieldBitsAtLeast(254)]),
     ("regression_7962", &[Capability::UnsignedFits(64)]),
     ("regression_8009", &[Capability::SignedFits(64)]),
     ("regression_8261", &[Capability::FieldBitsAtLeast(254)]),
+    ("regression_8755", &[Capability::FieldBitsAtLeast(254)]),
+    ("regression_9888", &[Capability::FieldBitsAtLeast(254)]),
     (
         "regression_brillig_const_fold_self_dedup",
         &[Capability::FieldBitsAtLeast(254)],
@@ -53,6 +76,16 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         "regression_struct_array_conditional",
         &[Capability::FieldBitsAtLeast(254)],
     ),
+    (
+        "regression_field_div_truncate",
+        &[Capability::UnsignedFits(128)],
+    ),
+    (
+        "regression_unused_nested_array_get",
+        &[Capability::FieldBitsAtLeast(254)],
+    ),
+    ("to_bytes_integration", &[Capability::FieldBitsAtLeast(254)]),
+    ("uhashmap", &[Capability::FieldBitsAtLeast(254)]),
     ("unsigned_to_signed_cast", &[Capability::UnsignedFits(64)]),
     (
         "fixtures/neg_interp_cast_u64_to_field",
@@ -89,6 +122,94 @@ const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
         "cast_regression_7776",
         "casts a - (c as Field) to u64 with inputs that make it -1 mod p, whose low 64 bits are \
          field-specific",
+    ),
+    (
+        "brillig_cow_regression",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "brillig_pedersen",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "embedded_curve_ops",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "import",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "inline_decompose_hint_brillig_call",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "merkle_insert",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "multi_scalar_mul",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "pedersen_check",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "pedersen_commitment",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "pedersen_hash",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "regression_12034",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "simple_shield",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "strings",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "regression_11659",
+        "calls the Poseidon2 permutation, which only bn254's solver implements",
+    ),
+    (
+        "regression_5045",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "regression_7744",
+        "names the embedded curve, which only bn254 defines",
+    ),
+    (
+        "regression_7128",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "to_be_bytes",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "to_bytes_consistent",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "to_le_bytes",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "unrolling_regression_8333",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "vectors",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
     ),
 ];
 
@@ -342,7 +463,7 @@ fn render_status(provenance: &DumpProvenance, rows: &[Row]) -> String {
          `Prover.toml` (exact under bn254; `Field` values ignored under goldilocks, whose corpus \
          records bn254 values): ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two sides: \
          `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field \
-         property the program's inputs, recorded return or casts need; `field-dependent`, \
+         property the program's inputs, recorded return, constants or casts need; `field-dependent`, \
          allowlisted as field-dependent by design; `both-sides`, neither side ran it; `unexpected`, a one-sided \
          gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest. \
          `AST` says whether both monomorphized programs project to the same hash. `Record` \

@@ -57,11 +57,14 @@ pub(crate) fn temp_noir_package(name: &str, source: &str) -> tempfile::TempDir {
 }
 
 fn enabled_features() -> Vec<String> {
-    if cfg!(feature = "goldilocks") {
-        vec!["goldilocks".to_string()]
-    } else {
-        Vec::new()
+    let mut features = Vec::new();
+    if cfg!(feature = "bn254-crypto") {
+        features.push("bn254-crypto".to_string());
     }
+    if cfg!(feature = "goldilocks") {
+        features.push("goldilocks".to_string());
+    }
+    features
 }
 
 #[derive(Debug, Clone)]
@@ -598,6 +601,20 @@ mod tests {
             corpus_hash(&base),
             corpus_hash(&[program("a", "1"), program("c", "2")])
         );
+    }
+
+    #[test]
+    fn dump_provenance_records_the_build_features() {
+        let recorded = provenance(&fixtures_dir(), &[], FieldId::linked());
+        let json = serde_json::to_value(recorded).unwrap();
+        let expected = if cfg!(feature = "goldilocks") {
+            serde_json::json!(["goldilocks"])
+        } else if cfg!(feature = "bn254-crypto") {
+            serde_json::json!(["bn254-crypto"])
+        } else {
+            serde_json::json!([])
+        };
+        assert_eq!(json["features"], expected);
     }
 
     #[test]

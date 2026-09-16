@@ -1,5 +1,7 @@
 //! Field-independent builtins the AST calls directly: slice ops, length, string<->bytes, field
 //! decomposition, and the black boxes over machine words that acvm implements without a field.
+//! bn254's curve and Poseidon2 black boxes live in `bn254_crypto`, behind the feature that links
+//! their solver.
 
 use acvm::BlackBoxResolutionError;
 use acvm::blackbox_solver;
@@ -62,7 +64,16 @@ impl<'p> Interpreter<'p> {
             "ecdsa_secp256r1" => ecdsa_verify(args, blackbox_solver::ecdsa_secp256r1_verify),
             // Printing does not touch the value a program computes.
             "print" => Ok(Value::Unit),
-            // bn254's crypto black boxes, comptime-only meta builtins, refcount ops.
+            #[cfg(feature = "bn254-crypto")]
+            "multi_scalar_mul"
+            | "embedded_curve_add"
+            | "poseidon2_permutation"
+            | "derive_pedersen_generators"
+                if self.field.id() == acvm::FieldId::Bn254 =>
+            {
+                super::bn254_crypto::call(name, args, return_type)
+            }
+            // bn254's crypto without its solver, comptime-only meta builtins, refcount ops.
             other => Err(InterpretError::Unsupported(format!("intrinsic '{other}'"))),
         }
     }
@@ -496,6 +507,44 @@ mod tests {
     }
     fn array_type(len: u32) -> Type {
         Type::Array(len, Rc::new(Type::Field)) // to_radix only reads the length
+    }
+
+    #[test]
+    #[cfg(feature = "bn254-crypto")]
+    fn bn254_crypto_requires_bn254_runtime_field() {
+        use noirc_frontend::monomorphization::ast::Program;
+
+        let program = Program::default();
+        let mut interpreter = Interpreter::new(&program, FieldId::Goldilocks);
+        let zero = Value::Field(FieldValue::zero(FieldId::Goldilocks));
+        let point = Value::tuple(vec![zero.clone(), zero.clone()]);
+        for (name, args) in [
+            (
+                "embedded_curve_add",
+                vec![point.clone(), point.clone(), Value::Bool(false)],
+            ),
+            (
+                "multi_scalar_mul",
+                vec![
+                    Value::Array(vec![point.clone()]),
+                    Value::Array(vec![point]),
+                    Value::Bool(false),
+                ],
+            ),
+            ("poseidon2_permutation", vec![Value::Array(vec![zero; 4])]),
+            (
+                "derive_pedersen_generators",
+                vec![u8_array(b"domain"), u32v(0)],
+            ),
+        ] {
+            assert!(
+                matches!(
+                    interpreter.call_intrinsic(name, args, &array_type(1), Location::dummy()),
+                    Err(InterpretError::Unsupported(_))
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]
