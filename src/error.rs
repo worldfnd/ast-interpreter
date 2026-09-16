@@ -12,7 +12,8 @@ pub enum InterpretError {
         location: Location,
         message: Option<String>,
     },
-    /// Checked integer arithmetic overflowed the operand type.
+    /// Checked integer arithmetic overflowed the operand type; the payload is the verb Noir's
+    /// own message uses.
     Overflow(String),
     /// Integer or field division by zero.
     DivisionByZero,
@@ -35,8 +36,8 @@ impl std::fmt::Display for InterpretError {
                 Some(m) => write!(f, "assertion failed: {m}"),
                 None => write!(f, "assertion failed"),
             },
-            InterpretError::Overflow(op) => write!(f, "integer overflow in {op}"),
-            InterpretError::DivisionByZero => write!(f, "division by zero"),
+            InterpretError::Overflow(op) => write!(f, "attempt to {op} with overflow"),
+            InterpretError::DivisionByZero => write!(f, "attempt to divide by zero"),
             InterpretError::ValueOutOfRange(m) => write!(f, "value out of range: {m}"),
             InterpretError::InvalidInput(m) => write!(f, "invalid input: {m}"),
             InterpretError::Type(m) => write!(f, "type error: {m}"),

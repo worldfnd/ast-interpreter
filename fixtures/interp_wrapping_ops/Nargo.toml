@@ -1,5 +1,5 @@
 [package]
-name = "interp_reached_dep_error"
+name = "interp_wrapping_ops"
 type = "bin"
 authors = [""]
 

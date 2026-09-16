@@ -13,7 +13,7 @@ use super::value::Value;
 
 /// Bump whenever the dump shape changes (`RunRecord`, `DiffValue`, `DumpProvenance`), so a stale
 /// dump is rejected rather than silently misread.
-pub const DUMP_FORMAT_VERSION: u32 = 3;
+pub const DUMP_FORMAT_VERSION: u32 = 4;
 
 /// A field-independent encoding of an interpreter [`Value`]. `Field` carries its canonical value
 /// as a decimal string; the field-axis comparison still treats it as opaque.
@@ -44,7 +44,8 @@ impl DiffValue {
             },
             Value::Bool(b) => DiffValue::Bool(*b),
             Value::Unit => DiffValue::Unit,
-            Value::Str(s) => DiffValue::Str(s.clone()),
+            // An entry point cannot return a format string, so a lossy one never reaches a dump.
+            Value::Str(s) | Value::LossyStr(s) => DiffValue::Str(s.clone()),
             Value::Array(elements) => {
                 DiffValue::Array(elements.iter().map(DiffValue::from_value).collect())
             }
@@ -95,7 +96,6 @@ fn render_list(values: &[DiffValue]) -> String {
 pub enum FailureKind {
     ProjectLoad,
     CompileError,
-    DependencyCompileGap,
     InputError,
     /// Normalized unsupported construct kind.
     Unsupported {
@@ -306,11 +306,7 @@ fn is_internal(outcome: &DiffOutcome) -> bool {
 pub(crate) fn is_coverage_gap(outcome: &DiffOutcome) -> bool {
     matches!(
         outcome,
-        DiffOutcome::Errored { error, .. }
-            if matches!(
-                error.kind,
-                FailureKind::Unsupported { .. } | FailureKind::DependencyCompileGap
-            )
+        DiffOutcome::Errored { error, .. } if matches!(error.kind, FailureKind::Unsupported { .. })
     )
 }
 
@@ -550,12 +546,11 @@ mod tests {
     #[test]
     fn returned_vs_coverage_gap_is_tolerated_and_counted() {
         let ran = DiffOutcome::Returned(int("1"));
-        for gap in [unsupported(), errored(FailureKind::DependencyCompileGap)] {
-            assert!(outcomes_equivalent(&ran, &gap).is_ok());
-            assert!(outcome_is_tolerated(&ran, &gap));
-            assert!(outcomes_equivalent(&gap, &ran).is_ok());
-            assert!(outcome_is_tolerated(&gap, &ran));
-        }
+        let gap = unsupported();
+        assert!(outcomes_equivalent(&ran, &gap).is_ok());
+        assert!(outcome_is_tolerated(&ran, &gap));
+        assert!(outcomes_equivalent(&gap, &ran).is_ok());
+        assert!(outcome_is_tolerated(&gap, &ran));
     }
 
     #[test]
@@ -584,12 +579,11 @@ mod tests {
     #[test]
     fn panic_is_never_tolerated() {
         let p = errored(FailureKind::Panic);
-        for gap in [unsupported(), errored(FailureKind::DependencyCompileGap)] {
-            assert!(outcomes_equivalent(&p, &gap).is_err());
-            assert!(!outcome_is_tolerated(&p, &gap));
-            assert!(outcomes_equivalent(&gap, &p).is_err());
-            assert!(!outcome_is_tolerated(&gap, &p));
-        }
+        let gap = unsupported();
+        assert!(outcomes_equivalent(&p, &gap).is_err());
+        assert!(!outcome_is_tolerated(&p, &gap));
+        assert!(outcomes_equivalent(&gap, &p).is_err());
+        assert!(!outcome_is_tolerated(&gap, &p));
     }
 
     #[test]
@@ -707,9 +701,22 @@ mod tests {
 
     #[test]
     fn a_stale_dump_format_is_rejected() {
-        let stale = r#"{"provenance":{"format_version":2,"field":"bn254","field_modulus":"1","noir_rev":"x","interpreter_rev":"y","corpus_dir":"z","program_count":0,"built_at":""},"outcomes":[]}"#;
-        let err = parse_dump(stale).unwrap_err();
-        assert!(err.contains("format 2"), "{err}");
-        assert!(err.contains("expects 3"), "{err}");
+        for version in [DUMP_FORMAT_VERSION - 1, DUMP_FORMAT_VERSION + 1] {
+            let stale = serde_json::json!({
+                "provenance": { "format_version": version },
+                "records": [["old", {
+                    "compile": { "Failed": { "error": {
+                        "kind": "DependencyCompileGap",
+                        "payload": "stdlib error"
+                    }, "detail": "stdlib error" } }
+                }]]
+            });
+            let err = parse_dump(&stale.to_string()).unwrap_err();
+            assert!(err.contains(&format!("format {version}")), "{err}");
+            assert!(
+                err.contains(&format!("expects {DUMP_FORMAT_VERSION}")),
+                "{err}"
+            );
+        }
     }
 }
