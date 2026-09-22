@@ -36,6 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Link the ABI parser against the field being swept.
         include:
           - field: bn254
             features: ""

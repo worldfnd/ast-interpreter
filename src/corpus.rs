@@ -4,7 +4,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use acvm::{AcirField, FieldElement};
+use acvm::{FieldConfig, FieldId};
 use fm::NormalizePath;
 use sha2::{Digest, Sha256};
 
@@ -42,12 +42,18 @@ pub(crate) fn fixtures_dir() -> PathBuf {
     crate_dir().join("fixtures")
 }
 
-pub(crate) fn field_tag() -> &'static str {
-    if cfg!(feature = "goldilocks") {
-        "goldilocks"
-    } else {
-        "bn254"
-    }
+/// Write a single-file Noir binary package into a fresh temporary directory. The caller keeps the
+/// returned handle alive for as long as it needs the sources on disk.
+pub(crate) fn temp_noir_package(name: &str, source: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(
+        root.path().join("Nargo.toml"),
+        format!("[package]\nname = \"{name}\"\ntype = \"bin\"\nauthors = []\n"),
+    )
+    .unwrap();
+    std::fs::write(root.path().join("src/main.nr"), source).unwrap();
+    root
 }
 
 fn enabled_features() -> Vec<String> {
@@ -154,13 +160,17 @@ fn toolchain_version() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-pub(crate) fn provenance(corpus: &Path, programs: &[CorpusProgram]) -> DumpProvenance {
+pub(crate) fn provenance(
+    corpus: &Path,
+    programs: &[CorpusProgram],
+    field: FieldId,
+) -> DumpProvenance {
     let root = crate_dir();
     DumpProvenance {
         format_version: DUMP_FORMAT_VERSION,
         projection_version: PROJECTION_VERSION,
-        field: field_tag().to_string(),
-        field_modulus: FieldElement::modulus().to_string(),
+        field: field.name().to_string(),
+        field_modulus: FieldConfig::new(field).modulus().to_string(),
         noir_rev: noirc_driver::GIT_COMMIT.to_string(),
         interpreter_rev: git_output(&root, &["rev-parse", "HEAD"])
             .unwrap_or_else(|| "unknown".to_string()),
@@ -372,7 +382,7 @@ fn normalize_step(step: StepOutcome, roots: &[(PathBuf, &str)]) -> StepOutcome {
 }
 
 /// Run in place so path dependencies resolve; the sweep checks checkout cleanliness first.
-pub(crate) fn run_record(program: &CorpusProgram) -> RunRecord {
+pub(crate) fn run_record(program: &CorpusProgram, field: FieldId) -> RunRecord {
     if program.workspace {
         return RunRecord {
             source_hash: program.source_hash.clone(),
@@ -387,7 +397,7 @@ pub(crate) fn run_record(program: &CorpusProgram) -> RunRecord {
             projection_hash: None,
         };
     }
-    let record = run_steps(&program.dir, program.source_hash.clone());
+    let record = run_steps(&program.dir, program.source_hash.clone(), field);
     let roots = path_roots(&program.dir);
     RunRecord {
         load: normalize_step(record.load, &roots),
@@ -399,7 +409,7 @@ pub(crate) fn run_record(program: &CorpusProgram) -> RunRecord {
     }
 }
 
-fn run_steps(root: &Path, source_hash: String) -> RunRecord {
+fn run_steps(root: &Path, source_hash: String, field: FieldId) -> RunRecord {
     let mut record = RunRecord {
         source_hash,
         load: StepOutcome::not_run("not attempted"),
@@ -430,7 +440,8 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
     };
 
     let validated = match run_step(|| {
-        compile_for_validation(&project).map_err(|e| (compile_error_of(&e), e.detail().to_string()))
+        compile_for_validation(&project, field)
+            .map_err(|e| (compile_error_of(&e), e.detail().to_string()))
     }) {
         Ok(validated) => {
             record.compile = StepOutcome::Passed;
@@ -455,11 +466,14 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
     let prover_src = std::fs::read_to_string(root.join("Prover.toml")).ok();
     let interpreted = run_step(|| {
         let inputs = match &prover_src {
-            Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
-                .map_err(|e| interpret_failure(&e))?,
+            Some(src) => {
+                inputs_from_prover_toml(&validated.program, &validated.abi, src, validated.field_id)
+                    .map_err(|e| interpret_failure(&e))?
+            }
             None => Vec::new(),
         };
-        interpret_with_inputs(&validated.program, inputs).map_err(|e| interpret_failure(&e))
+        interpret_with_inputs(&validated.program, inputs, validated.field_id)
+            .map_err(|e| interpret_failure(&e))
     });
     match interpreted {
         Ok(value) => {
@@ -473,16 +487,21 @@ fn run_steps(root: &Path, source_hash: String) -> RunRecord {
 }
 
 /// Check the return against the `return` recorded in `Prover.toml`: exactly under bn254, with
-/// `Field` values ignored under goldilocks because the corpus records bn254's. A recorded return
-/// the parser refuses under this field, or one the input bridge does not decode, leaves the check
-/// not run.
+/// `Field` values ignored under every other field because the corpus records bn254's. A recorded
+/// return the parser refuses under this field, or one the input bridge does not decode, leaves the
+/// check not run.
 fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) -> StepOutcome {
     let Some(src) = prover_src else {
         return StepOutcome::not_run("no Prover.toml");
     };
     let recorded = run_step(|| {
-        expected_return_from_prover_toml(&validated.program, &validated.abi, src)
-            .map_err(|e| interpret_failure(&e))
+        expected_return_from_prover_toml(
+            &validated.program,
+            &validated.abi,
+            src,
+            validated.field_id,
+        )
+        .map_err(|e| interpret_failure(&e))
     });
     match recorded {
         Err(StepOutcome::Failed { error, .. })
@@ -495,11 +514,11 @@ fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &Value) 
         }
         Err(step) => step,
         Ok(None) => StepOutcome::not_run("no recorded return"),
-        Ok(Some(expected)) => compare_with_recorded(actual, &expected),
+        Ok(Some(expected)) => compare_with_recorded(actual, &expected, validated.field_id),
     }
 }
 
-fn compare_with_recorded(actual: &Value, expected: &Value) -> StepOutcome {
+fn compare_with_recorded(actual: &Value, expected: &Value, field: FieldId) -> StepOutcome {
     let actual = DiffValue::from_value(actual);
     let expected = DiffValue::from_value(expected);
     if let Err(reason) = values_equivalent(&actual, &expected) {
@@ -508,7 +527,7 @@ fn compare_with_recorded(actual: &Value, expected: &Value) -> StepOutcome {
             format!("interpreter returned {actual}"),
         );
     }
-    if cfg!(feature = "goldilocks") || actual == expected {
+    if field != FieldId::Bn254 || actual == expected {
         StepOutcome::Passed
     } else {
         StepOutcome::failed(
@@ -526,6 +545,11 @@ mod tests {
     use super::*;
     use crate::IntValue;
     use num_bigint::BigInt;
+
+    /// The tests below record under the field this build is linked against.
+    fn run_record_linked(program: &CorpusProgram) -> RunRecord {
+        run_record(program, FieldId::linked())
+    }
 
     fn write(dir: &Path, relative: &str, contents: &str) {
         let path = dir.join(relative);
@@ -668,7 +692,7 @@ mod tests {
 
     #[test]
     fn a_compile_failure_leaves_the_later_steps_not_run() {
-        let record = run_record(&fixture_program("neg_reachable_error"));
+        let record = run_record_linked(&fixture_program("neg_reachable_error"));
         assert!(record.load.passed(), "{:?}", record.load);
         assert!(
             !record.compile.passed(),
@@ -691,7 +715,7 @@ mod tests {
 
     #[test]
     fn a_returning_fixture_records_its_value_and_projection() {
-        let record = run_record(&fixture_program("interp_inputs_u64"));
+        let record = run_record_linked(&fixture_program("interp_inputs_u64"));
         assert!(record.compile.passed(), "{:?}", record.compile);
         assert!(record.interpret.passed(), "{:?}", record.interpret);
         assert_eq!(
@@ -709,7 +733,7 @@ mod tests {
 
     #[test]
     fn an_unrepresentable_recorded_return_leaves_the_return_check_not_run() {
-        let record = run_record(&fixture_program("interp_return_i64"));
+        let record = run_record_linked(&fixture_program("interp_return_i64"));
         assert!(record.interpret.passed(), "{:?}", record.interpret);
         if cfg!(feature = "goldilocks") {
             assert!(
@@ -723,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_return_comparison_is_exact_on_bn254_and_field_opaque_on_goldilocks() {
+    fn recorded_field_returns_are_compared_exactly_only_on_bn254() {
         let int = |v: u64| {
             Value::Int(IntValue {
                 signed: false,
@@ -731,22 +755,29 @@ mod tests {
                 value: BigInt::from(v),
             })
         };
-        assert!(compare_with_recorded(&int(7), &int(7)).passed());
-        let mismatch = compare_with_recorded(&int(7), &int(8));
+        assert!(compare_with_recorded(&int(7), &int(7), FieldId::linked()).passed());
+        let mismatch = compare_with_recorded(&int(7), &int(8), FieldId::linked());
         assert_eq!(
             mismatch.failure().map(|e| &e.kind),
             Some(&FailureKind::OracleMismatch)
         );
 
-        let field = |v: u64| Value::Field(FieldElement::from(v as u128));
-        let differing = compare_with_recorded(&field(1), &field(2));
-        if cfg!(feature = "goldilocks") {
-            assert!(differing.passed(), "{differing:?}");
-        } else {
-            assert_eq!(
-                differing.failure().map(|e| e.payload.as_str()),
-                Some("field value differs from the recorded return")
-            );
+        let field = |v: u64| {
+            Value::Field(
+                acvm::FieldValue::try_from_biguint(u128::from(v).into(), FieldId::linked())
+                    .expect("the test values are below every modulus"),
+            )
+        };
+        // The corpus records bn254's `Field` values, so only a bn254 run compares them exactly.
+        assert_eq!(
+            compare_with_recorded(&field(1), &field(2), FieldId::Bn254)
+                .failure()
+                .map(|e| e.payload.as_str()),
+            Some("field value differs from the recorded return")
+        );
+        for other in FieldId::ALL.into_iter().filter(|id| *id != FieldId::Bn254) {
+            let differing = compare_with_recorded(&field(1), &field(2), other);
+            assert!(differing.passed(), "{other}: {differing:?}");
         }
     }
 }

@@ -6,13 +6,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
 
 use super::capability::Capability;
+use acvm::{FieldConfig, FieldId};
+
 use super::corpus::{
-    CorpusProgram, check_checkout_matches_stamp, corpus_dir, crate_dir, field_tag, fixtures_dir,
-    hex, list_programs, noir_checkout, provenance, run_record,
+    CorpusProgram, check_checkout_matches_stamp, corpus_dir, crate_dir, fixtures_dir, hex,
+    list_programs, noir_checkout, provenance, run_record,
 };
 use super::diff::{
     ComparableError, CrossFieldDump, DiffOutcome, DumpProvenance, FailureKind, RunRecord,
@@ -106,12 +107,12 @@ fn is_allowlisted(name: &str) -> bool {
         .any(|(entry, _)| *entry == name)
 }
 
-/// Whether a capability tag of `name` fails to hold for `modulus`.
-fn predicted_gap(name: &str, modulus: &BigUint) -> bool {
+/// Whether a capability tag of `name` fails to hold for `field`.
+fn predicted_gap(name: &str, field: FieldConfig) -> bool {
     PROGRAM_CAPABILITIES
         .iter()
         .find(|(entry, _)| *entry == name)
-        .is_some_and(|(_, tags)| tags.iter().any(|tag| !tag.holds(modulus)))
+        .is_some_and(|(_, tags)| tags.iter().any(|tag| !tag.holds(field)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,9 +167,10 @@ fn divergence_is_allowlistable(a: &DiffOutcome, b: &DiffOutcome) -> bool {
     !is_hard_failure(a) && !is_hard_failure(b)
 }
 
+/// The two fields being compared, in the order `classify` takes their outcomes.
 struct Sides {
-    bn254: BigUint,
-    goldilocks: BigUint,
+    a: FieldConfig,
+    b: FieldConfig,
 }
 
 /// Classify one program's pair of outcomes (`a` under bn254, `b` under goldilocks).
@@ -188,16 +190,16 @@ fn classify(name: &str, a: &DiffOutcome, b: &DiffOutcome, sides: &Sides) -> Verd
                 (DiffOutcome::Returned(_), DiffOutcome::Errored { error, .. })
                     if refused(error) =>
                 {
-                    Some(&sides.goldilocks)
+                    Some(sides.b)
                 }
                 (DiffOutcome::Errored { error, .. }, DiffOutcome::Returned(_))
                     if refused(error) =>
                 {
-                    Some(&sides.bn254)
+                    Some(sides.a)
                 }
                 _ => None,
             };
-            if refusing_side.is_some_and(|modulus| predicted_gap(name, modulus)) {
+            if refusing_side.is_some_and(|field| predicted_gap(name, field)) {
                 Verdict::PredictedGap
             } else if allowlisted && divergence_is_allowlistable(a, b) {
                 Verdict::FieldDependent
@@ -210,17 +212,17 @@ fn classify(name: &str, a: &DiffOutcome, b: &DiffOutcome, sides: &Sides) -> Verd
             if gap_a && gap_b {
                 return Verdict::CoverageGap;
             }
-            let (gap, other, modulus) = if gap_a {
-                (a, b, &sides.bn254)
+            let (gap, other, field) = if gap_a {
+                (a, b, sides.a)
             } else {
-                (b, a, &sides.goldilocks)
+                (b, a, sides.b)
             };
             let DiffOutcome::Errored { error, .. } = gap else {
                 unreachable!("a coverage gap is an errored outcome");
             };
             if error.kind == FailureKind::DependencyCompileGap {
                 Verdict::DependencyGap
-            } else if predicted_gap(name, modulus) {
+            } else if predicted_gap(name, field) {
                 Verdict::PredictedGap
             } else if !matches!(other, DiffOutcome::Returned(_)) {
                 Verdict::CoverageGap
@@ -462,22 +464,43 @@ fn records_for(
     prefix: &str,
     done: &mut usize,
     total: usize,
+    field: FieldId,
 ) -> Vec<(String, RunRecord)> {
     programs
         .iter()
         .map(|program| {
             *done += 1;
             eprintln!("[{done}/{total}] {}{}", prefix, program.name);
-            (format!("{prefix}{}", program.name), run_record(program))
+            (
+                format!("{prefix}{}", program.name),
+                run_record(program, field),
+            )
         })
         .collect()
 }
 
-/// `make sweep FIELD=<field>`: record the corpus and the fixtures under this build into
+/// The field to sweep, named by `FIELD` in the environment; the build does not decide it.
+fn swept_field() -> FieldId {
+    let name = std::env::var("FIELD")
+        .unwrap_or_else(|_| panic!("set FIELD=<field>, as `make sweep FIELD=<field>` does"));
+    FieldId::from_name(&name)
+        .unwrap_or_else(|| panic!("FIELD={name} is not a field this compiler knows"))
+}
+
+/// `make sweep FIELD=<field>`: record the corpus and the fixtures under `FIELD` into
 /// `target/status/<field>.json`.
+///
+/// Requires a build linked against `FIELD` because the ABI parser uses the linked field.
 #[test]
 #[ignore = "status: run `make sweep FIELD=<field>`"]
 fn dump_records() {
+    let field = swept_field();
+    assert_eq!(
+        field,
+        FieldId::linked(),
+        "sweeping {field} needs a build linked against it; the ABI parser reads inputs in {}",
+        FieldId::linked()
+    );
     let checkout = noir_checkout();
     check_checkout_matches_stamp(&checkout).unwrap_or_else(|e| panic!("{e}"));
     let corpus = corpus_dir();
@@ -491,12 +514,18 @@ fn dump_records() {
 
     let total = programs.len() + fixtures.len();
     let mut done = 0;
-    let mut records = records_for(&programs, "", &mut done, total);
-    records.extend(records_for(&fixtures, FIXTURE_PREFIX, &mut done, total));
+    let mut records = records_for(&programs, "", &mut done, total, field);
+    records.extend(records_for(
+        &fixtures,
+        FIXTURE_PREFIX,
+        &mut done,
+        total,
+        field,
+    ));
     check_checkout_matches_stamp(&checkout).unwrap_or_else(|e| panic!("{e}"));
 
     let dump = CrossFieldDump {
-        provenance: provenance(&corpus, &programs),
+        provenance: provenance(&corpus, &programs, field),
         records,
     };
     let json = serde_json::to_string_pretty(&dump).unwrap();
@@ -504,7 +533,7 @@ fn dump_records() {
     assert_eq!(restored, dump, "dump must round-trip through JSON");
 
     std::fs::create_dir_all(dump_dir()).unwrap();
-    let path = dump_path(field_tag());
+    let path = dump_path(field.name());
     std::fs::write(&path, &json).unwrap();
     let returned = dump
         .records
@@ -514,7 +543,7 @@ fn dump_records() {
     println!(
         "recorded {} programs ({returned} returned a value) under {} at noir {}: {}",
         dump.records.len(),
-        field_tag(),
+        field.name(),
         dump.provenance.noir_rev,
         path.display()
     );
@@ -542,10 +571,6 @@ fn render_status_file() {
         (pa.field.as_str(), pb.field.as_str()),
         ("bn254", "goldilocks")
     );
-    assert_ne!(
-        pa.field_modulus, pb.field_modulus,
-        "both dumps are the same field"
-    );
     for (p, tag) in [(pa, "bn254"), (pb, "goldilocks")] {
         assert_eq!(
             p.projection_version, PROJECTION_VERSION,
@@ -570,9 +595,24 @@ fn render_status_file() {
     );
     assert_eq!(pa.program_count, pb.program_count);
 
+    // Each dump names its own field; the modulus it recorded has to agree with that name.
+    let side = |p: &DumpProvenance| {
+        let config = FieldConfig::new(
+            FieldId::from_name(&p.field)
+                .unwrap_or_else(|| panic!("dump names an unknown field {}", p.field)),
+        );
+        assert_eq!(
+            p.field_modulus,
+            config.modulus().to_string(),
+            "the {} dump records a modulus that is not {}'s",
+            config.name(),
+            config.name()
+        );
+        config
+    };
     let sides = Sides {
-        bn254: pa.field_modulus.parse().unwrap(),
-        goldilocks: pb.field_modulus.parse().unwrap(),
+        a: side(pa),
+        b: side(pb),
     };
     let bn: BTreeMap<String, RunRecord> = bn254.records.into_iter().collect();
     let gl: BTreeMap<String, RunRecord> = goldilocks.records.into_iter().collect();
@@ -637,10 +677,8 @@ mod tests {
 
     fn sides() -> Sides {
         Sides {
-            bn254: "21888242871839275222246405745257275088548364400416034343698204186575808495617"
-                .parse()
-                .unwrap(),
-            goldilocks: "18446744069414584321".parse().unwrap(),
+            a: FieldConfig::new(FieldId::Bn254),
+            b: FieldConfig::new(FieldId::Goldilocks),
         }
     }
 
