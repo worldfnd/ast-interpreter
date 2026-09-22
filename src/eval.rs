@@ -207,7 +207,11 @@ impl<'p> Interpreter<'p> {
             }
 
             Expression::ExtractTupleField(tuple, field) => {
-                self.eval_expr_value(tuple, env)?.tuple_field(*field)?
+                match self.eval_expr_value(tuple, env)? {
+                    // Reference projections alias the field; value reads have a Dereference node.
+                    Value::Ref(cell, _) => project_reference(&cell, *field)?,
+                    other => other.tuple_field(*field)?,
+                }
             }
 
             Expression::Call(call) => {
@@ -854,6 +858,23 @@ fn strip_clone(lvalue: &LValue) -> &LValue {
         current = inner;
     }
     current
+}
+
+/// Project onto a shared field cell, preserving the operand's reference depth.
+fn project_reference(cell: &Rc<RefCell<Value>>, i: usize) -> Result<Value, InterpretError> {
+    let projected = match &*cell.borrow() {
+        Value::Tuple(cells) => cells
+            .get(i)
+            .cloned()
+            .ok_or_else(|| InterpretError::Type(format!("tuple field {i} out of bounds")))?,
+        Value::Ref(inner, _) => Rc::new(RefCell::new(project_reference(inner, i)?)),
+        other => {
+            return Err(InterpretError::Type(format!(
+                "cannot extract field {i} through a reference to {other:?}"
+            )));
+        }
+    };
+    Ok(Value::Ref(projected, false))
 }
 
 /// A tuple's shared cells, peeling through any depth of references. The shared peel primitive for

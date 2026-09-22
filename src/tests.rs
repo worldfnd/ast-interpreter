@@ -474,6 +474,14 @@ fn interprets_reference_call_chain() {
     );
 }
 
+#[test]
+fn interprets_field_projections_through_references() {
+    assert_eq!(
+        interpret_fixture("interp_refs_offset_receiver").unwrap(),
+        Value::Unit
+    );
+}
+
 /// An enum `match` binds a variant's payload via the `(tag, payload…)` tuple. `x = 3` → `3 * 4 == 12`.
 #[test]
 fn interprets_enum_match() {
@@ -1047,6 +1055,7 @@ fn oracle_matches_interpreter_smoke() {
         "interp_refs_call_chain",
         "interp_refs_nested_field",
         "interp_refs_double_deref_alias",
+        "interp_refs_offset_receiver",
         "interp_match_enum",
         "interp_match_int",
         "intrinsic_slice_ops",

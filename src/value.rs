@@ -129,22 +129,20 @@ impl Value {
         )
     }
 
-    /// Read tuple field `i` as an owned, unaliased value; auto-derefs a reference to a tuple.
+    /// Read tuple field `i` as an owned, unaliased value.
     pub fn tuple_field(&self, i: usize) -> Result<Value, InterpretError> {
         match self {
             Value::Tuple(cells) => cells
                 .get(i)
                 .map(|c| c.borrow().deep_copy())
                 .ok_or_else(|| InterpretError::Type(format!("tuple field {i} out of bounds"))),
-            Value::Ref(cell, _) => cell.borrow().tuple_field(i),
             other => Err(InterpretError::Type(format!(
                 "cannot extract field from {other:?}"
             ))),
         }
     }
 
-    /// Follow a reference one level. A non-`Ref` is a reference shape we don't model (nested or
-    /// multi-level) — tolerated as `Unsupported`, not a miscompile.
+    /// Follow a reference one level, copying values while preserving nested references.
     pub fn deref(&self) -> Result<Value, InterpretError> {
         match self {
             Value::Ref(cell, _) => Ok(cell.borrow().deep_copy()),
