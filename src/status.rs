@@ -61,6 +61,7 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         &[Capability::FieldBitsAtLeast(254)],
     ),
     ("regression_10180", &[Capability::FieldBitsAtLeast(254)]),
+    ("regression_11294", &[Capability::FieldBitsAtLeast(254)]),
     ("regression_5252", &[Capability::FieldBitsAtLeast(254)]),
     ("regression_5615", &[Capability::FieldBitsAtLeast(254)]),
     ("regression_7962", &[Capability::UnsignedFits(64)]),
