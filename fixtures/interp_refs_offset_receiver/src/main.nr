@@ -1,5 +1,5 @@
-// A field of a reference used as a `&mut self` receiver, one and two reference levels deep: the
-// callee must see the caller's cell, not a copy of the field.
+// A field of a reference used as a `&mut self` receiver or behind `&mut`, one and two reference
+// levels deep: the callee must see the caller's cell, not a copy of the field.
 struct BV {
     storage: [Field; 2],
     len: u32,
@@ -57,6 +57,9 @@ struct Holder {
 fn through_two_levels(h: &mut &mut Holder) {
     h.inner.bar.bump();
     h.inner.tag += 10;
+    let field = &mut h.inner;
+    let foo: &mut Foo = *field;
+    foo.bar.x += 100;
 }
 
 fn main() {
@@ -79,7 +82,7 @@ fn main() {
     let mut fresh = Holder { inner: Foo { bar: Bar { x: 2 }, tag: 0 } };
     let mut r = &mut fresh;
     through_two_levels(&mut r);
-    assert(fresh.inner.bar.x == 3);
+    assert(fresh.inner.bar.x == 103);
     assert(fresh.inner.tag == 10);
     assert(r.inner.tag == 10);
 }

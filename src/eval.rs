@@ -92,11 +92,9 @@ impl<'p> Interpreter<'p> {
             }
 
             Expression::Unary(unary) => match &unary.operator {
+                // `skip` marks an offset through a reference, which already is the reference.
+                UnaryOp::Reference { .. } if unary.skip => self.eval_expr_value(&unary.rhs, env)?,
                 // `&`/`&mut`: reuse a slot's cell to alias it, else box the value in a fresh cell.
-                // The `skip` flag (set for `&mut a.b.c` taken through a reference field, where
-                // member access is elaborated as an offset that already denotes the reference)
-                // doesn't change this: `eval_place` peels to the live cell either way, while
-                // evaluating the rhs as a value would drop the reference.
                 UnaryOp::Reference { .. } => match self.eval_place(&unary.rhs, env)? {
                     Value::Ref(cell, true) => Value::Ref(cell, false),
                     other => Value::Ref(Rc::new(RefCell::new(other)), false),
@@ -644,9 +642,7 @@ impl<'p> Interpreter<'p> {
                 _ => self.eval_expr_value(expr, env),
             },
             Expression::ExtractTupleField(inner, i) => {
-                // Peel through any depth of references to the live tuple cells (the same helper the
-                // write side uses), so `&mut pp.field` through a `&mut &mut S` aliases the real
-                // cell rather than a one-level snapshot.
+                // Peel through references to the live tuple cells, as the write side does.
                 let cells = tuple_cells_of(self.eval_place(inner, env)?)?;
                 let cell = cells.get(*i).cloned().ok_or_else(|| {
                     InterpretError::Type(format!("tuple field {i} out of bounds"))
