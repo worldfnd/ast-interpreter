@@ -9,11 +9,12 @@ use super::corpus::{
 use super::diff::{FailureKind, comparable_error_of};
 use super::expected_return_from_prover_toml;
 use super::loader::NoirProject;
-use super::validation_frontend::{Validated, compile_for_validation};
+use super::validation_frontend::{Validated, compile_for_validation, stdlib_tests};
 use super::{
     IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
 };
 use acvm::{FieldConfig, FieldId, FieldValue};
+use noirc_frontend::token::TestScope;
 use num_bigint::BigInt;
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
@@ -34,6 +35,32 @@ fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let project = NoirProject::new(fixture(name))?;
     let validated = compile_for_validation(&project, FieldId::linked())?;
     Ok(interpret(&validated.program, validated.field_id)?)
+}
+
+fn assert_fixture_return(name: &str, expected: Value) {
+    let root = fixture(name);
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project, FieldId::linked())
+        .unwrap_or_else(|error| panic!("{name}: frontend: {error}"));
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .unwrap_or_else(|error| panic!("{name}: inputs: {error}"));
+    let result = interpret_with_inputs(&validated.program, inputs, validated.field_id)
+        .unwrap_or_else(|error| panic!("{name}: interpret: {error}"));
+    let recorded = expected_return_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    )
+    .unwrap_or_else(|error| panic!("{name}: recorded return: {error}"));
+    assert_eq!(result, expected, "{name}");
+    assert_eq!(recorded, Some(expected), "{name}: recorded return");
 }
 
 fn compile_source(source: &str, field: FieldId) -> Validated {
@@ -202,7 +229,6 @@ fn interprets_casts_above_the_modulus() {
 }
 
 /// A false (non-const-folded) assertion interprets to `AssertionFailed`, not a clean pass.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn detects_false_assertion() {
     let project = NoirProject::new(negative_fixture("assert_fail")).expect("project");
@@ -213,62 +239,10 @@ fn detects_false_assertion() {
     }
 }
 
-/// A type error in code `main` *reaches* must be rejected, not silently monomorphized. A clean
-/// `Ok(())` is the hole we guard against; a monomorphizer panic on the `Error` node also counts.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn rejects_reachable_type_error() {
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let project = NoirProject::new(negative_fixture("reachable_error")).expect("project");
-        compile_for_validation(&project, FieldId::linked()).map(|_| ())
-    }));
-    match outcome {
-        Ok(Err(_)) => {} // rejected cleanly — desired
-        Err(_) => {}     // monomorphizer panicked on the Error node — also a rejection
-        Ok(Ok(())) => panic!(
-            "reachable type error was silently accepted: the validation frontend produced a \
-             mono-AST for un-type-checkable reachable code — oracle false-confidence hole"
-        ),
-    }
-}
-
-/// Reached dependency code with tolerated diagnostics must be rejected before interpretation.
-#[cfg(feature = "goldilocks")]
-#[test]
-fn rejects_reached_dependency_error() {
-    let project = NoirProject::new(fixture("interp_reached_dep_error")).expect("project");
-    let err = match compile_for_validation(&project, FieldId::linked()) {
-        Ok(_) => panic!(
-            "a program reaching code from a tolerated-error file must be rejected, not validated"
-        ),
-        Err(e) => e,
-    };
-    assert!(
-        err.is_dependency_compile_gap(),
-        "expected the tolerated-file invariant rejection, got: {err}"
-    );
-}
-
-/// The same dependency fixture compiles and interprets under bn254.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn interprets_reached_dep_fixture_on_bn254() {
-    let project = NoirProject::new(fixture("interp_reached_dep_error")).expect("project");
-    let validated =
-        compile_for_validation(&project, FieldId::linked()).expect("clean compile under bn254");
-    let x = Value::Int(IntValue {
-        signed: false,
-        bits: 32,
-        value: BigInt::from(3u32),
-    });
-    let result =
-        interpret_with_inputs(&validated.program, vec![x], validated.field_id).expect("interpret");
-    let expected = Value::Int(IntValue {
-        signed: false,
-        bits: 32,
-        value: BigInt::from(2u32),
-    });
-    assert_eq!(result, expected);
+    let project = NoirProject::new(negative_fixture("reachable_error")).expect("project");
+    assert!(compile_for_validation(&project, FieldId::linked()).is_err());
 }
 
 /// The `Prover.toml` input bridge: `interp_inputs_u64` with `x = 3` computes `x*2 + (p+1)` in u64.
@@ -555,7 +529,6 @@ fn interprets_integer_match() {
     assert_eq!(run(-2), i32v(100), "negative literal case");
 }
 
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn renders_assert_message() {
     let project = NoirProject::new(negative_fixture("assert_fmt_msg")).expect("project");
@@ -569,6 +542,38 @@ fn renders_assert_message() {
         ),
         other => panic!("expected AssertionFailed with a rendered message, got {other:?}"),
     }
+}
+
+#[test]
+fn stored_format_strings_reject_erased_type_names() {
+    let validated = compile_source(
+        "struct Pair { x: u32 } fn main(flag: bool) {
+         let p = Pair { x: 7 }; let message = f\"value: {p}\"; assert(flag, message); }",
+        FieldId::linked(),
+    );
+    let result = interpret_with_inputs(
+        &validated.program,
+        vec![Value::Bool(false)],
+        validated.field_id,
+    );
+    assert!(
+        matches!(result, Err(InterpretError::Unsupported(ref message)) if message.contains("erased type metadata")),
+        "{result:?}"
+    );
+}
+
+/// A struct in a format string loses its name in the mono AST; that is fine on the way to
+/// `print`, whose text is dropped.
+#[test]
+fn printed_format_strings_may_interpolate_erased_aggregates() {
+    let validated = compile_source(
+        "struct Pair { x: u32 } fn main() { let p = Pair { x: 7 }; println(f\"value: {p}\"); }",
+        FieldId::linked(),
+    );
+    assert_eq!(
+        interpret(&validated.program, validated.field_id).unwrap(),
+        Value::Unit
+    );
 }
 
 /// A `main` with inputs interprets correctly from `Prover.toml`. `assert_statement` has `x == y == 3`.
@@ -671,16 +676,222 @@ fn validates_goldilocks_mono_ast_u64() {
     );
 }
 
+#[test]
+fn interprets_wide_integers() {
+    for bits in [34u32, 36, 66, 126, 128] {
+        assert_fixture_return(
+            &format!("interp_width_{bits}"),
+            Value::Int(IntValue::canonical(false, bits, BigInt::from(16))),
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_integer_widths() {
+    for (name, needle) in [
+        ("width_odd", "`u33` is not a supported integer type"),
+        ("width_gap", "`u10` is not a supported integer type"),
+        (
+            "width_above_max",
+            "`u65538` is not a supported integer type",
+        ),
+        ("width_unresolved", "Could not resolve 'N' in path"),
+    ] {
+        let project = NoirProject::new(negative_fixture(name)).expect("project");
+        let error = match compile_for_validation(&project, FieldId::linked()) {
+            Ok(_) => panic!("{name}: validation accepted an invalid width"),
+            Err(error) => error,
+        };
+        assert!(
+            error.summary().contains(needle),
+            "{name}: {}",
+            error.summary()
+        );
+    }
+}
+
+#[test]
+fn interprets_stdlib_fixtures() {
+    for (name, expected) in [
+        (
+            "interp_wrapping_ops",
+            Value::Int(IntValue::canonical(false, 64, BigInt::from(7))),
+        ),
+        ("interp_hash_limbs", Value::Bool(false)),
+        ("interp_field_lt", Value::Bool(true)),
+        ("interp_derive_eq_hash", Value::Bool(false)),
+    ] {
+        assert_fixture_return(name, expected);
+    }
+}
+
+#[cfg(not(feature = "goldilocks"))]
+#[test]
+fn bn254_accepts_input_above_the_goldilocks_modulus() {
+    assert_fixture_return(
+        "neg_wide_input_u66",
+        Value::Int(IntValue::canonical(false, 66, BigInt::from(1u8) << 65usize)),
+    );
+}
+
+#[cfg(feature = "goldilocks")]
+#[test]
+fn goldilocks_rejects_input_above_its_modulus() {
+    let root = fixture("neg_wide_input_u66");
+    let project = NoirProject::new(root.clone()).expect("project");
+    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
+    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
+    let inputs = inputs_from_prover_toml(
+        &validated.program,
+        &validated.abi,
+        &toml,
+        validated.field_id,
+    );
+    assert!(
+        matches!(inputs, Err(InterpretError::InvalidInput(_))),
+        "{inputs:?}"
+    );
+}
+
 // --- Differential oracle: interpreter vs Noir's own ACVM/Brillig executor (see `noir_oracle.rs`).
 // Two independent lowerings (tree-walk vs full ACIR compile+execute) must agree on the return. ---
+
+/// Run every argument-less stdlib test; only explicitly disabled crypto is a coverage gap.
+#[test]
+fn the_stdlib_tests_pass_under_the_linked_field() {
+    let root = temp_noir_package("test", "fn main() {}");
+    let project = NoirProject::new(root.path().to_path_buf()).expect("project");
+    let (mut passed, mut gaps, mut failures) = (0, Vec::new(), Vec::new());
+    for test in stdlib_tests(&project, FieldId::linked()).expect("frontend") {
+        let outcome = match test.program {
+            Err(error) if matches!(test.scope, TestScope::ShouldFailWith { .. }) => {
+                expected_test_outcome(&test.scope, Some(error.summary().to_string()))
+            }
+            Err(error) => Err(format!("monomorphization: {error}")),
+            Ok(program) => {
+                match panic::catch_unwind(AssertUnwindSafe(|| {
+                    interpret(&program, FieldId::linked())
+                })) {
+                    Err(payload) => Err(format!("panic: {}", panic_message(payload.as_ref()))),
+                    Ok(Err(InterpretError::Unsupported(what)))
+                        if !cfg!(feature = "bn254-crypto")
+                            && matches!(
+                                what.as_str(),
+                                "intrinsic 'multi_scalar_mul'"
+                                    | "intrinsic 'embedded_curve_add'"
+                                    | "intrinsic 'poseidon2_permutation'"
+                                    | "intrinsic 'derive_pedersen_generators'"
+                            ) =>
+                    {
+                        gaps.push(format!("{}: {what}", test.name));
+                        continue;
+                    }
+                    Ok(result) => stdlib_test_outcome(&test.scope, result),
+                }
+            }
+        };
+        match outcome {
+            Ok(()) => passed += 1,
+            Err(why) => failures.push(format!("{}: {why}", test.name)),
+        }
+    }
+    println!(
+        "stdlib tests under {}: {passed} passed, {} gaps\n{}",
+        FieldId::linked(),
+        gaps.len(),
+        gaps.join("\n")
+    );
+    assert!(passed > 0, "no stdlib tests ran");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Whether a test's result is the one its scope asks for.
+fn stdlib_test_outcome(
+    scope: &TestScope,
+    result: Result<Value, InterpretError>,
+) -> Result<(), String> {
+    let failure = match result {
+        Ok(_) => None,
+        Err(
+            error @ (InterpretError::Type(_)
+            | InterpretError::Internal(_)
+            | InterpretError::Unsupported(_)
+            | InterpretError::InvalidInput(_)),
+        ) => {
+            return Err(error.to_string());
+        }
+        Err(InterpretError::AssertionFailed {
+            message: Some(message),
+            ..
+        }) => Some(message),
+        Err(error) => Some(error.to_string()),
+    };
+    expected_test_outcome(scope, failure)
+}
+
+fn expected_test_outcome(scope: &TestScope, failure: Option<String>) -> Result<(), String> {
+    match (scope, failure) {
+        (TestScope::None, None) | (TestScope::OnlyFailWith { .. }, None) => Ok(()),
+        (TestScope::None, Some(failure)) => Err(failure),
+        (TestScope::ShouldFailWith { .. }, None) => Err("did not fail".to_string()),
+        (TestScope::ShouldFailWith { reason: None }, Some(_)) => Ok(()),
+        (
+            TestScope::ShouldFailWith {
+                reason: Some(reason),
+            },
+            Some(failure),
+        )
+        | (TestScope::OnlyFailWith { reason }, Some(failure)) => {
+            if failure.to_lowercase().contains(&reason.to_lowercase()) {
+                Ok(())
+            } else {
+                Err(format!("failed with {failure:?} rather than {reason:?}"))
+            }
+        }
+    }
+}
+
+#[test]
+fn stdlib_expected_failures_match_noir() {
+    let should_fail = TestScope::ShouldFailWith { reason: None };
+    let reason = TestScope::ShouldFailWith {
+        reason: Some("EXPECTED".into()),
+    };
+    let only = TestScope::OnlyFailWith {
+        reason: "EXPECTED".into(),
+    };
+    for (scope, failure, passes) in [
+        (&TestScope::None, None, true),
+        (&TestScope::None, Some("expected"), false),
+        (&should_fail, None, false),
+        (&should_fail, Some("anything"), true),
+        (&reason, Some("expected failure"), true),
+        (&reason, Some("different failure"), false),
+        (&only, None, true),
+        (&only, Some("expected failure"), true),
+        (&only, Some("different failure"), false),
+    ] {
+        assert_eq!(
+            expected_test_outcome(scope, failure.map(str::to_string)).is_ok(),
+            passes
+        );
+    }
+    for error in [
+        InterpretError::Internal("expected".into()),
+        InterpretError::Type("expected".into()),
+        InterpretError::InvalidInput("expected".into()),
+        InterpretError::Unsupported("intrinsic 'blake3'".into()),
+    ] {
+        assert!(stdlib_test_outcome(&should_fail, Err(error)).is_err());
+    }
+}
 
 /// Run one program through both the interpreter and Noir's executor and classify the comparison.
 /// The executor runs even when the interpreter rejects the program, so a *false rejection* (interp
 /// errors on something nargo runs fine) is caught, not hidden. Buckets: `"agree"`,
 /// `"FALSE-REJECTION: ..."`, `"MISMATCH: ..."`, `"oracle-wrong: ..."`, `"interp-unsupported: ..."`
-/// (tolerated gap), `"interp-panic: ..."` (always an interpreter bug, never folded into
-/// `both-errored`), `"oracle-errored"`, `"both-errored"`. Under goldilocks the executor can't
-/// elaborate the bn254 stdlib, so comparisons stay vacuous.
+/// (tolerated gap), `"interp-panic: ..."`, `"interp-internal: ..."` (both always failures),
+/// `"oracle-errored"`, `"both-errored"`.
 fn oracle_compare(program_dir: &Path) -> String {
     use super::noir_oracle::noir_execute_return;
 
@@ -728,6 +939,7 @@ fn oracle_compare(program_dir: &Path) -> String {
 
     match (interp, executor_ok) {
         (Err((FailureKind::Panic, detail)), _) => format!("interp-panic: {detail}"),
+        (Err((FailureKind::Internal, detail)), _) => format!("interp-internal: {detail}"),
         (Err((FailureKind::Unsupported { construct }, _)), Some(_)) => {
             format!("interp-unsupported: {construct}")
         }
@@ -784,8 +996,7 @@ fn oracle_compare(program_dir: &Path) -> String {
     }
 }
 
-/// The interpreter and Noir's ACVM executor agree on the in-crate fixtures. bn254 only — under
-/// goldilocks the executor cannot compile them yet.
+/// Compare the fixtures supported by the BN254 executor with the interpreter.
 #[cfg(not(feature = "goldilocks"))]
 #[test]
 fn oracle_matches_interpreter_smoke() {
@@ -810,6 +1021,10 @@ fn oracle_matches_interpreter_smoke() {
         "interp_intrinsic_hints",
         "interp_aggregate_eq",
         "interp_closures",
+        "interp_field_lt",
+        "interp_hash_limbs",
+        "interp_derive_eq_hash",
+        "interp_wrapping_ops",
     ] {
         let result = oracle_compare(&fixture(name));
         assert_eq!(
@@ -820,7 +1035,8 @@ fn oracle_matches_interpreter_smoke() {
 }
 
 /// Differential survey: run the whole `execution_success` corpus through the interpreter and
-/// Noir's executor and fail on any `MISMATCH` or `FALSE-REJECTION`. Tolerated `interp-unsupported`
+/// Noir's executor and fail on mismatches, false rejections, panics or internal errors.
+/// Tolerated `interp-unsupported`
 /// is counted, not failed. `#[ignore]`d and needs a big stack:
 ///   RUST_MIN_STACK=1073741824 cargo test --lib \
 ///       tests::oracle_survey_execution_success -- --ignored --nocapture
@@ -846,7 +1062,15 @@ fn oracle_survey_execution_success() {
             .trim()
             .to_string();
         *buckets.entry(bucket).or_default() += 1;
-        if result.starts_with("MISMATCH") || result.starts_with("FALSE-REJECTION") {
+        if [
+            "MISMATCH",
+            "FALSE-REJECTION",
+            "interp-panic",
+            "interp-internal",
+        ]
+        .iter()
+        .any(|prefix| result.starts_with(prefix))
+        {
             failures.push(format!("{name}: {result}"));
         }
     }
@@ -862,7 +1086,7 @@ fn oracle_survey_execution_success() {
     }
     assert!(
         failures.is_empty(),
-        "{} interpreter/executor failure(s) found (MISMATCH or FALSE-REJECTION)",
+        "{} interpreter/executor failure(s) found",
         failures.len()
     );
 }

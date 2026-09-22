@@ -57,11 +57,14 @@ pub(crate) fn temp_noir_package(name: &str, source: &str) -> tempfile::TempDir {
 }
 
 fn enabled_features() -> Vec<String> {
-    if cfg!(feature = "goldilocks") {
-        vec!["goldilocks".to_string()]
-    } else {
-        Vec::new()
+    let mut features = Vec::new();
+    if cfg!(feature = "bn254-crypto") {
+        features.push("bn254-crypto".to_string());
     }
+    if cfg!(feature = "goldilocks") {
+        features.push("goldilocks".to_string());
+    }
+    features
 }
 
 #[derive(Debug, Clone)]
@@ -307,12 +310,7 @@ fn run_step<T>(
 }
 
 pub(crate) fn compile_error_of(error: &ValidationError) -> ComparableError {
-    let kind = if error.is_dependency_compile_gap() {
-        FailureKind::DependencyCompileGap
-    } else {
-        FailureKind::CompileError
-    };
-    ComparableError::new(kind, normalize_text(error.summary()))
+    ComparableError::new(FailureKind::CompileError, normalize_text(error.summary()))
 }
 
 fn interpret_failure(error: &InterpretError) -> (ComparableError, String) {
@@ -603,6 +601,20 @@ mod tests {
             corpus_hash(&base),
             corpus_hash(&[program("a", "1"), program("c", "2")])
         );
+    }
+
+    #[test]
+    fn dump_provenance_records_the_build_features() {
+        let recorded = provenance(&fixtures_dir(), &[], FieldId::linked());
+        let json = serde_json::to_value(recorded).unwrap();
+        let expected = if cfg!(feature = "goldilocks") {
+            serde_json::json!(["goldilocks"])
+        } else if cfg!(feature = "bn254-crypto") {
+            serde_json::json!(["bn254-crypto"])
+        } else {
+            serde_json::json!([])
+        };
+        assert_eq!(json["features"], expected);
     }
 
     #[test]

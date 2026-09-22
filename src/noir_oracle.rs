@@ -2,8 +2,8 @@
 //! its decoded return value with the interpreter's. Mirrors the compile-then-execute sequence in
 //! Noir's `tooling/artifact_cli/src/execution.rs`, reimplemented to avoid the CLI crate dependency.
 //!
-//! Under `goldilocks` many programs cannot compile until the crypto stdlib supports the smaller
-//! field, so asserting tests are gated to bn254.
+//! Without `bn254-crypto` the executor gets a stub black-box solver, so curve and Poseidon2
+//! opcodes fail.
 
 use noirc_abi::input_parser::{Format, InputValue};
 use noirc_abi::{InputMap, MAIN_RETURN_NAME};
@@ -46,9 +46,9 @@ pub(crate) fn noir_execute_return(
     let mut foreign_executor =
         nargo::foreign_calls::DefaultForeignCallBuilder::default().build::<acvm::FieldElement>();
 
-    #[cfg(not(feature = "goldilocks"))]
+    #[cfg(feature = "bn254-crypto")]
     let solver = bn254_blackbox_solver::Bn254BlackBoxSolver;
-    #[cfg(feature = "goldilocks")]
+    #[cfg(not(feature = "bn254-crypto"))]
     let solver = acvm::blackbox_solver::StubbedBlackBoxSolver;
 
     let witness_stack = nargo::ops::execute_program(
