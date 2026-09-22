@@ -818,6 +818,15 @@ fn interprets_stdlib_fixtures() {
             "interp_refcount_constrained",
             Value::Int(IntValue::canonical(false, 32, BigInt::from(0))),
         ),
+        (
+            "interp_str_bytes",
+            Value::Array(
+                [0x41u8, 0xFF, 0x42]
+                    .into_iter()
+                    .map(|byte| Value::Int(IntValue::canonical(false, 8, BigInt::from(byte))))
+                    .collect(),
+            ),
+        ),
     ] {
         assert_fixture_return(name, expected);
     }
@@ -1112,6 +1121,7 @@ fn oracle_matches_interpreter_smoke() {
         "interp_refs_double_deref_alias",
         "interp_refs_offset_receiver",
         "interp_refcount_constrained",
+        "interp_str_bytes",
         "interp_match_enum",
         "interp_match_int",
         "intrinsic_slice_ops",

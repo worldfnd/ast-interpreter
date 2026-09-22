@@ -378,10 +378,7 @@ impl<'p> Interpreter<'p> {
             },
             Literal::Bool(b) => Value::Bool(*b),
             Literal::Unit => Value::Unit,
-            // Noir strings may be non-UTF-8; ours is a Rust `String`, so tolerate that case.
-            Literal::Str(s) => Value::Str(String::from_utf8(s.clone()).map_err(|e| {
-                InterpretError::Unsupported(format!("non-UTF-8 string literal: {e}"))
-            })?),
+            Literal::Str(bytes) => Value::Str(bytes.clone()),
             Literal::Array(array) | Literal::Vector(array) => {
                 let mut elements = Vec::with_capacity(array.contents.len());
                 for element in &array.contents {
@@ -584,7 +581,7 @@ impl<'p> Interpreter<'p> {
         env: &mut Frame,
     ) -> Option<String> {
         match self.eval_expr_value(expr, env).ok()? {
-            Value::Str(s) => Some(s),
+            Value::Str(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
             Value::FmtStr {
                 fragments,
                 captures,
@@ -965,7 +962,9 @@ fn format_value(value: &Value, typ: &PrintableType) -> Result<String, InterpretE
         (Value::Int(int), PrintableType::SignedInteger { .. })
         | (Value::Int(int), PrintableType::UnsignedInteger { .. }) => Ok(int.value.to_string()),
         (Value::Bool(value), PrintableType::Boolean) => Ok(value.to_string()),
-        (Value::Str(value), PrintableType::String { .. }) => Ok(value.clone()),
+        (Value::Str(bytes), PrintableType::String { .. }) => {
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        }
         (
             Value::FmtStr {
                 fragments,
@@ -1561,6 +1560,14 @@ mod aggregate_and_fmt_tests {
 
     #[test]
     fn format_value_uses_noir_display_rules() {
+        assert_eq!(
+            format_value(
+                &Value::Str(vec![0x66, 0x6f, 0xFF, 0x6f]),
+                &PrintableType::String { length: 4 }
+            )
+            .unwrap(),
+            "fo\u{FFFD}o"
+        );
         let i32_type = PrintableType::SignedInteger { width: 32 };
         assert_eq!(format_value(&i32v(-7), &i32_type).unwrap(), "-7");
         assert_eq!(

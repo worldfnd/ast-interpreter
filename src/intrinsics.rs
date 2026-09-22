@@ -205,8 +205,8 @@ fn vector_remove(args: Vec<Value>, location: Location) -> Result<Value, Interpre
 fn str_as_bytes(args: Vec<Value>) -> Result<Value, InterpretError> {
     let [value] = take(args)?;
     match value {
-        Value::Str(s) => Ok(Value::Array(
-            s.into_bytes()
+        Value::Str(bytes) => Ok(Value::Array(
+            bytes
                 .into_iter()
                 .map(|b| Value::Int(IntValue::canonical(false, 8, BigInt::from(b))))
                 .collect(),
@@ -226,11 +226,7 @@ fn array_as_str_unchecked(args: Vec<Value>) -> Result<Value, InterpretError> {
             .map_err(|_| InterpretError::Type("string byte out of range".to_string()))?;
         bytes.push(byte);
     }
-    // Noir strings may be non-UTF-8; ours is a Rust `String`, so tolerate that case.
-    let s = String::from_utf8(bytes).map_err(|e| {
-        InterpretError::Unsupported(format!("array_as_str_unchecked on non-UTF-8 bytes: {e}"))
-    })?;
-    Ok(Value::Str(s))
+    Ok(Value::Str(bytes))
 }
 
 /// Field decomposition into `limb_count` radix digits (faithful to Noir's `constant_to_radix`):
@@ -322,7 +318,7 @@ fn static_assert(args: &[Value], location: Location) -> Result<Value, InterpretE
                 Ok(Value::Unit)
             } else {
                 let message = match args.get(1) {
-                    Some(Value::Str(s)) => Some(s.clone()),
+                    Some(Value::Str(bytes)) => Some(String::from_utf8_lossy(bytes).into_owned()),
                     Some(Value::FmtStr {
                         fragments,
                         captures,
@@ -336,12 +332,12 @@ fn static_assert(args: &[Value], location: Location) -> Result<Value, InterpretE
                         let types = metadata
                             .iter()
                             .map(|value| {
-                                let Value::Str(text) = value else {
+                                let Value::Str(bytes) = value else {
                                     return Err(InterpretError::Internal(
                                         "static_assert capture type is not a string".to_string(),
                                     ));
                                 };
-                                serde_json::from_str(text).map_err(|error| {
+                                serde_json::from_slice(bytes).map_err(|error| {
                                     InterpretError::Internal(format!(
                                         "invalid static_assert capture type: {error}"
                                     ))

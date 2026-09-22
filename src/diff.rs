@@ -46,7 +46,7 @@ impl DiffValue {
             },
             Value::Bool(b) => DiffValue::Bool(*b),
             Value::Unit => DiffValue::Unit,
-            Value::Str(s) => DiffValue::Str(s.clone()),
+            Value::Str(bytes) => DiffValue::Str(String::from_utf8_lossy(bytes).into_owned()),
             Value::FmtStr { .. } => {
                 return Err(InterpretError::Internal(
                     "a format string was returned from the entry point".to_string(),

@@ -275,7 +275,7 @@ pub(crate) fn value_from_input(
                 .collect::<Result<_, _>>()?;
             Ok(Value::tuple(values))
         }
-        (InputValue::String(s), Type::String(_)) => Ok(Value::Str(s.clone())),
+        (InputValue::String(s), Type::String(_)) => Ok(Value::Str(s.clone().into_bytes())),
         (input, typ) => Err(InterpretError::Unsupported(format!(
             "input value {input:?} for parameter type {typ:?}"
         ))),

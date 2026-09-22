@@ -26,7 +26,8 @@ pub enum Value {
     Array(Vec<Value>),
     // Fields are shared cells so `&mut s.field` aliases; value reads `deep_copy` out.
     Tuple(Vec<Rc<RefCell<Value>>>),
-    Str(String),
+    /// A string's bytes, which need not be UTF-8; printing decodes them lossily, as Noir does.
+    Str(Vec<u8>),
     /// Captured values, rendered with the assertion's type metadata to preserve aggregate names.
     FmtStr {
         fragments: Vec<FmtStrFragment>,
