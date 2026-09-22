@@ -224,11 +224,15 @@ const PROJECTION_INVARIANT_FIXTURES: &[&str] = &[
     "interp_match_enum",
     "interp_match_int",
     "interp_casts_above_modulus",
+    "interp_width_2",
+    "interp_width_10",
+    "interp_width_33",
     "interp_width_34",
     "interp_width_36",
     "interp_width_66",
     "interp_width_126",
     "interp_width_128",
+    "interp_width_16384",
     "neg_wide_input_u66",
 ];
 

@@ -677,11 +677,21 @@ fn validates_goldilocks_mono_ast_u64() {
 }
 
 #[test]
-fn interprets_wide_integers() {
-    for bits in [34u32, 36, 66, 126, 128] {
+fn interprets_integer_widths() {
+    for (bits, returned) in [
+        (2u32, 3),
+        (10, 16),
+        (33, 16),
+        (34, 16),
+        (36, 16),
+        (66, 16),
+        (126, 16),
+        (128, 16),
+        (16384, 16),
+    ] {
         assert_fixture_return(
             &format!("interp_width_{bits}"),
-            Value::Int(IntValue::canonical(false, bits, BigInt::from(16))),
+            Value::Int(IntValue::canonical(false, bits, BigInt::from(returned))),
         );
     }
 }
