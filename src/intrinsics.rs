@@ -323,6 +323,33 @@ fn static_assert(args: &[Value], location: Location) -> Result<Value, InterpretE
             } else {
                 let message = match args.get(1) {
                     Some(Value::Str(s)) => Some(s.clone()),
+                    Some(Value::FmtStr {
+                        fragments,
+                        captures,
+                    }) => {
+                        // Monomorphization appends each capture's printable type, then `true`.
+                        let Some((Value::Bool(true), metadata)) = args[2..].split_last() else {
+                            return Err(InterpretError::Internal(
+                                "static_assert format string has no type metadata".to_string(),
+                            ));
+                        };
+                        let types = metadata
+                            .iter()
+                            .map(|value| {
+                                let Value::Str(text) = value else {
+                                    return Err(InterpretError::Internal(
+                                        "static_assert capture type is not a string".to_string(),
+                                    ));
+                                };
+                                serde_json::from_str(text).map_err(|error| {
+                                    InterpretError::Internal(format!(
+                                        "invalid static_assert capture type: {error}"
+                                    ))
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Some(super::eval::format_fmt_str(fragments, captures, &types)?)
+                    }
                     _ => None,
                 };
                 Err(InterpretError::AssertionFailed { location, message })

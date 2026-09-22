@@ -919,7 +919,7 @@ fn printable_capture_types(typ: PrintableType) -> Option<Vec<PrintableType>> {
     }
 }
 
-fn format_fmt_str(
+pub(super) fn format_fmt_str(
     fragments: &[FmtStrFragment],
     values: &[Value],
     types: &[PrintableType],

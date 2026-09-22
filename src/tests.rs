@@ -586,6 +586,19 @@ fn stored_format_strings_render_with_their_type_names() {
              assert(which != 8, reassigned);
              let empty = f\"no captures\";
              assert(which != 9, empty);
+             if which == 10 {
+                 std::static_assert(false, f\"static {p}\");
+             }
+             if which == 11 {
+                 let x: u32 = 7;
+                 std::static_assert(false, f\"x={x}\");
+             }
+             if which == 12 {
+                 std::static_assert(false, f\"no captures\");
+             }
+             if which == 13 {
+                 std::static_assert(false, f\"outer {message}\");
+             }
          }",
         FieldId::linked(),
     );
@@ -600,6 +613,10 @@ fn stored_format_strings_render_with_their_type_names() {
         (7, "saved Pair { x: 7 }"),
         (8, "new Pair { x: 9 }"),
         (9, "no captures"),
+        (10, "static Pair { x: 7 }"),
+        (11, "x=7"),
+        (12, "no captures"),
+        (13, "outer value: Pair { x: 7 }"),
     ] {
         let input = Value::Int(IntValue::canonical(false, 32, BigInt::from(which)));
         let result = interpret_with_inputs(&validated.program, vec![input], validated.field_id);
@@ -611,7 +628,7 @@ fn stored_format_strings_render_with_their_type_names() {
             other => panic!("which = {which}: {other:?}"),
         }
     }
-    let input = Value::Int(IntValue::canonical(false, 32, BigInt::from(10)));
+    let input = Value::Int(IntValue::canonical(false, 32, BigInt::from(14)));
     assert_eq!(
         interpret_with_inputs(&validated.program, vec![input], validated.field_id).unwrap(),
         Value::Unit

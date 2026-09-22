@@ -18,6 +18,7 @@ bn254_blackbox_solver = { workspace = true, optional = true }
 num-bigint = { version = "0.5", features = ["serde"] }
 num-traits = { version = "0.2" }
 serde = { workspace = true }
+serde_json = { version = "1.0" }
 sha2 = "0.10"
 
 # Optional integration oracle. Restore this dependency and feature forwarding when a matching branch
@@ -32,7 +33,6 @@ nargo.workspace = true
 noirc_driver.workspace = true
 # Executor oracle used by tests.
 noirc_artifacts.workspace = true
-serde_json = { version = "1.0" }
 tempfile.workspace = true
 # Randomized value-semantics tests.
 proptest = "1"
