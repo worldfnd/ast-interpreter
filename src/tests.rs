@@ -688,22 +688,47 @@ fn interprets_wide_integers() {
 
 #[test]
 fn rejects_invalid_integer_widths() {
-    for (name, needle) in [
-        ("width_odd", "`u33` is not a supported integer type"),
-        ("width_gap", "`u10` is not a supported integer type"),
+    const RULE: &str = "integer widths are every width from 2 to 16384";
+    for (name, messages, note) in [
         (
             "width_above_max",
-            "`u65538` is not a supported integer type",
+            &["`u16385` is not a supported integer type"][..],
+            RULE,
         ),
-        ("width_unresolved", "Could not resolve 'N' in path"),
+        (
+            "width_zero",
+            &["`u0` is not a supported integer type"][..],
+            RULE,
+        ),
+        (
+            "width_one",
+            &[
+                "`u1` is not a supported integer type",
+                "`i1` is not a supported integer type",
+            ][..],
+            "`u1` has been removed, use `bool` instead",
+        ),
+        (
+            "width_unresolved",
+            &["Could not resolve 'N' in path"][..],
+            "",
+        ),
     ] {
         let project = NoirProject::new(negative_fixture(name)).expect("project");
         let error = match compile_for_validation(&project, FieldId::linked()) {
             Ok(_) => panic!("{name}: validation accepted an invalid width"),
             Err(error) => error,
         };
+        for message in messages {
+            assert!(
+                error.summary().contains(message),
+                "{name}: {}",
+                error.summary()
+            );
+        }
+        assert!(error.detail().contains(note), "{name}: {}", error.detail());
         assert!(
-            error.summary().contains(needle),
+            !error.summary().contains("Could not resolve 'u"),
             "{name}: {}",
             error.summary()
         );
