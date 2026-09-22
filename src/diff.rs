@@ -13,10 +13,12 @@ use super::value::Value;
 
 /// Bump whenever the dump shape changes (`RunRecord`, `DiffValue`, `DumpProvenance`), so a stale
 /// dump is rejected rather than silently misread.
-pub const DUMP_FORMAT_VERSION: u32 = 4;
+pub const DUMP_FORMAT_VERSION: u32 = 5;
 
 /// A field-independent encoding of an interpreter [`Value`]. `Field` carries its canonical value
-/// as a decimal string; the field-axis comparison still treats it as opaque.
+/// as a decimal string; the field-axis comparison still treats it as opaque. A string is `Str`
+/// when its bytes are UTF-8 and `Bytes` otherwise, so two byte strings that decode to the same
+/// lossy text stay distinct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffValue {
     Field(String),
@@ -28,6 +30,7 @@ pub enum DiffValue {
     Bool(bool),
     Unit,
     Str(String),
+    Bytes(Vec<u8>),
     Array(Vec<DiffValue>),
     Tuple(Vec<DiffValue>),
     Function,
@@ -46,7 +49,10 @@ impl DiffValue {
             },
             Value::Bool(b) => DiffValue::Bool(*b),
             Value::Unit => DiffValue::Unit,
-            Value::Str(bytes) => DiffValue::Str(String::from_utf8_lossy(bytes).into_owned()),
+            Value::Str(bytes) => match String::from_utf8(bytes.clone()) {
+                Ok(text) => DiffValue::Str(text),
+                Err(error) => DiffValue::Bytes(error.into_bytes()),
+            },
             Value::FmtStr { .. } => {
                 return Err(InterpretError::Internal(
                     "a format string was returned from the entry point".to_string(),
@@ -84,6 +90,7 @@ impl fmt::Display for DiffValue {
             DiffValue::Bool(b) => write!(f, "{b}"),
             DiffValue::Unit => f.write_str("()"),
             DiffValue::Str(s) => write!(f, "{s:?}"),
+            DiffValue::Bytes(bytes) => write!(f, "b\"{}\"", bytes.escape_ascii()),
             DiffValue::Array(xs) => write!(f, "[{}]", render_list(xs)),
             DiffValue::Tuple(xs) => write!(f, "({})", render_list(xs)),
             DiffValue::Function => f.write_str("fn"),
@@ -453,6 +460,13 @@ pub fn values_equivalent(a: &DiffValue, b: &DiffValue) -> Result<(), String> {
                 Err(format!("string differs: {x:?} vs {y:?}"))
             }
         }
+        (DiffValue::Bytes(x), DiffValue::Bytes(y)) => {
+            if x == y {
+                Ok(())
+            } else {
+                Err(format!("string bytes differ: {x:?} vs {y:?}"))
+            }
+        }
         (
             DiffValue::Int {
                 signed: s1,
@@ -524,6 +538,23 @@ mod tests {
             err.contains("tuple[1]"),
             "path should point at the mismatch: {err}"
         );
+    }
+
+    #[test]
+    fn byte_strings_are_recorded_exactly_and_never_equal_their_lossy_text() {
+        let broken = vec![0x41, 0xFF, 0x42];
+        let recorded = DiffValue::from_value(&Value::Str(broken.clone())).unwrap();
+        assert_eq!(recorded, DiffValue::Bytes(broken));
+        assert_eq!(
+            DiffValue::from_value(&Value::Str(b"AB".to_vec())).unwrap(),
+            DiffValue::Str("AB".to_string())
+        );
+        let json = serde_json::to_string(&recorded).unwrap();
+        assert_eq!(serde_json::from_str::<DiffValue>(&json).unwrap(), recorded);
+        assert_eq!(recorded.to_string(), "b\"A\\xffB\"");
+        assert!(values_equivalent(&recorded, &recorded).is_ok());
+        assert!(values_equivalent(&recorded, &DiffValue::Str("A\u{FFFD}B".to_string())).is_err());
+        assert!(values_equivalent(&recorded, &DiffValue::Bytes(vec![0x41, 0xFE, 0x42])).is_err());
     }
 
     #[test]
