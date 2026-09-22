@@ -322,7 +322,7 @@ fn static_assert(args: &[Value], location: Location) -> Result<Value, InterpretE
                 Ok(Value::Unit)
             } else {
                 let message = match args.get(1) {
-                    Some(Value::Str(s) | Value::LossyStr(s)) => Some(s.clone()),
+                    Some(Value::Str(s)) => Some(s.clone()),
                     _ => None,
                 };
                 Err(InterpretError::AssertionFailed { location, message })

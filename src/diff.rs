@@ -34,8 +34,10 @@ pub enum DiffValue {
 }
 
 impl DiffValue {
-    pub fn from_value(value: &Value) -> DiffValue {
-        match value {
+    /// Encode a returned value. No ABI type carries a format string, so an entry point cannot
+    /// return one; meeting one is an interpreter invariant failure.
+    pub fn from_value(value: &Value) -> Result<DiffValue, InterpretError> {
+        Ok(match value {
             Value::Field(field) => DiffValue::Field(field.to_bigint().to_string()),
             Value::Int(int) => DiffValue::Int {
                 signed: int.signed,
@@ -44,21 +46,28 @@ impl DiffValue {
             },
             Value::Bool(b) => DiffValue::Bool(*b),
             Value::Unit => DiffValue::Unit,
-            // An entry point cannot return a format string, so a lossy one never reaches a dump.
-            Value::Str(s) | Value::LossyStr(s) => DiffValue::Str(s.clone()),
-            Value::Array(elements) => {
-                DiffValue::Array(elements.iter().map(DiffValue::from_value).collect())
+            Value::Str(s) => DiffValue::Str(s.clone()),
+            Value::FmtStr { .. } => {
+                return Err(InterpretError::Internal(
+                    "a format string was returned from the entry point".to_string(),
+                ));
             }
+            Value::Array(elements) => DiffValue::Array(
+                elements
+                    .iter()
+                    .map(DiffValue::from_value)
+                    .collect::<Result<_, _>>()?,
+            ),
             Value::Tuple(cells) => DiffValue::Tuple(
                 cells
                     .iter()
                     .map(|c| DiffValue::from_value(&c.borrow()))
-                    .collect(),
+                    .collect::<Result<_, _>>()?,
             ),
             Value::Function(_) => DiffValue::Function,
-            // A returned `main` value is Ref-free, but deref defensively so this stays total.
-            Value::Ref(cell, _) => DiffValue::from_value(&cell.borrow()),
-        }
+            // Entry-point returns are reference-free; still accept caller-built references.
+            Value::Ref(cell, _) => DiffValue::from_value(&cell.borrow())?,
+        })
     }
 }
 
@@ -515,6 +524,22 @@ mod tests {
             err.contains("tuple[1]"),
             "path should point at the mismatch: {err}"
         );
+    }
+
+    #[test]
+    fn a_format_string_cannot_be_recorded() {
+        let fmt = Value::FmtStr {
+            fragments: Vec::new(),
+            captures: Vec::new(),
+        };
+        assert!(matches!(
+            DiffValue::from_value(&fmt),
+            Err(InterpretError::Internal(_))
+        ));
+        assert!(matches!(
+            DiffValue::from_value(&Value::tuple(vec![fmt])),
+            Err(InterpretError::Internal(_))
+        ));
     }
 
     #[test]

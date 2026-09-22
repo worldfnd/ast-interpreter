@@ -164,14 +164,16 @@ fn rejects_inputs_from_another_field() {
         );
     }
 
-    // Noir refuses a reference as an entry-point type, so a `Ref` input is always a caller error
-    // and has no accepted spelling to check; the traversal still has to look inside one rather
-    // than take it for a leaf.
+    // Caller-built values must be checked even inside shapes the ABI cannot express.
     let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
     for hidden in [
         Value::Ref(cell(&bad), false),
         Value::Array(vec![Value::Ref(cell(&bad), false)]),
         Value::tuple(vec![Value::Ref(cell(&bad), true)]),
+        Value::FmtStr {
+            fragments: Vec::new(),
+            captures: vec![Value::tuple(vec![bad.clone()])],
+        },
     ] {
         match interpret_with_inputs(&validated.program, vec![hidden.clone()], field) {
             Err(InterpretError::InvalidInput(message)) => {
@@ -553,33 +555,65 @@ fn renders_assert_message() {
 }
 
 #[test]
-fn stored_format_strings_reject_erased_type_names() {
+fn stored_format_strings_render_with_their_type_names() {
     let validated = compile_source(
-        "struct Pair { x: u32 } fn main(flag: bool) {
-         let p = Pair { x: 7 }; let message = f\"value: {p}\"; assert(flag, message); }",
+        "struct Pair { x: u32 }
+         struct Wrap { p: Pair, tag: bool }
+         fn main(which: u32) {
+             let p = Pair { x: 7 };
+             let message = f\"value: {p}\";
+             println(message);
+             let messages = [f\"a: {p}\", f\"b: {p}\"];
+             let w = Wrap { p, tag: true };
+             let picked = if which == 3 { f\"x {w}\" } else { f\"y {w}\" };
+             let tuple = (f\"t0 {p}\", 5);
+             assert(which != 0, message);
+             assert(which != 1, messages[1]);
+             assert((which != 2) & (which != 3), picked);
+             assert(which != 4, tuple.0);
+             let s = \"plain\";
+             assert(which != 5, f\"nested str {s}\");
+             let holder = (p, 1);
+             assert(which != 6, f\"held {holder}\");
+             let mut changing = Pair { x: 7 };
+             let snapshot = f\"saved {changing}\";
+             changing.x = 9;
+             assert(changing.x == 9);
+             assert(which != 7, snapshot);
+             let mut reassigned = f\"old {p}\";
+             let q = changing;
+             reassigned = f\"new {q}\";
+             assert(which != 8, reassigned);
+             let empty = f\"no captures\";
+             assert(which != 9, empty);
+         }",
         FieldId::linked(),
     );
-    let result = interpret_with_inputs(
-        &validated.program,
-        vec![Value::Bool(false)],
-        validated.field_id,
-    );
-    assert!(
-        matches!(result, Err(InterpretError::Unsupported(ref message)) if message.contains("erased type metadata")),
-        "{result:?}"
-    );
-}
-
-/// A struct in a format string loses its name in the mono AST; that is fine on the way to
-/// `print`, whose text is dropped.
-#[test]
-fn printed_format_strings_may_interpolate_erased_aggregates() {
-    let validated = compile_source(
-        "struct Pair { x: u32 } fn main() { let p = Pair { x: 7 }; println(f\"value: {p}\"); }",
-        FieldId::linked(),
-    );
+    for (which, expected) in [
+        (0, "value: Pair { x: 7 }"),
+        (1, "b: Pair { x: 7 }"),
+        (2, "y Wrap { p: Pair { x: 7 }, tag: true }"),
+        (3, "x Wrap { p: Pair { x: 7 }, tag: true }"),
+        (4, "t0 Pair { x: 7 }"),
+        (5, "nested str plain"),
+        (6, "held (Pair { x: 7 }, 0x01)"),
+        (7, "saved Pair { x: 7 }"),
+        (8, "new Pair { x: 9 }"),
+        (9, "no captures"),
+    ] {
+        let input = Value::Int(IntValue::canonical(false, 32, BigInt::from(which)));
+        let result = interpret_with_inputs(&validated.program, vec![input], validated.field_id);
+        match result {
+            Err(InterpretError::AssertionFailed {
+                message: Some(message),
+                ..
+            }) => assert_eq!(message, expected, "which = {which}"),
+            other => panic!("which = {which}: {other:?}"),
+        }
+    }
+    let input = Value::Int(IntValue::canonical(false, 32, BigInt::from(10)));
     assert_eq!(
-        interpret(&validated.program, validated.field_id).unwrap(),
+        interpret_with_inputs(&validated.program, vec![input], validated.field_id).unwrap(),
         Value::Unit
     );
 }

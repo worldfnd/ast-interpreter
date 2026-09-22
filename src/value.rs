@@ -6,6 +6,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::{One, Zero};
 
 use noirc_frontend::monomorphization::ast::FuncId;
+use noirc_frontend::token::FmtStrFragment;
 
 use super::error::InterpretError;
 
@@ -26,10 +27,11 @@ pub enum Value {
     // Fields are shared cells so `&mut s.field` aliases; value reads `deep_copy` out.
     Tuple(Vec<Rc<RefCell<Value>>>),
     Str(String),
-    /// A formatted string whose text is not what Noir prints: an interpolated struct or enum lost
-    /// its name in the mono AST. `print` may discard it and a call may forward it; storing it in a
-    /// binding is refused.
-    LossyStr(String),
+    /// Captured values, rendered with the assertion's type metadata to preserve aggregate names.
+    FmtStr {
+        fragments: Vec<FmtStrFragment>,
+        captures: Vec<Value>,
+    },
     Function(FuncId),
     // Shared cell. `auto_deref` = a `let mut`/mutable-param slot (loaded on a bare read); a plain
     // `&`/`&mut` reference is `false`.
@@ -164,6 +166,13 @@ impl Value {
                     .collect(),
             ),
             Value::Array(elements) => Value::Array(elements.iter().map(Value::deep_copy).collect()),
+            Value::FmtStr {
+                fragments,
+                captures,
+            } => Value::FmtStr {
+                fragments: fragments.clone(),
+                captures: captures.iter().map(Value::deep_copy).collect(),
+            },
             other => other.clone(),
         }
     }

@@ -116,7 +116,10 @@ pub(crate) fn validate_inputs(inputs: &[Value], field: FieldId) -> Result<(), In
                 )));
             }
             Value::Int(int) => return check_int(int),
-            Value::Array(values) => {
+            Value::Array(values)
+            | Value::FmtStr {
+                captures: values, ..
+            } => {
                 return values
                     .iter()
                     .try_for_each(|value| check(value, field, seen));
