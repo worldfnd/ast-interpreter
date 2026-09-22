@@ -1,3 +1,3 @@
-fn main(x: u65538) -> pub u65538 {
+fn main(x: u16385) -> pub u16385 {
     x
 }

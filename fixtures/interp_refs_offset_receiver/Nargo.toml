@@ -1,0 +1,6 @@
+[package]
+name = "interp_refs_offset_receiver"
+type = "bin"
+authors = [""]
+
+[dependencies]

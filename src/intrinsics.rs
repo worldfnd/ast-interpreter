@@ -64,6 +64,13 @@ impl<'p> Interpreter<'p> {
             "ecdsa_secp256r1" => ecdsa_verify(args, blackbox_solver::ecdsa_secp256r1_verify),
             // Printing does not touch the value a program computes.
             "print" => Ok(Value::Unit),
+            // Refcounts are Brillig-specific; constrained code always returns zero.
+            "array_refcount" | "vector_refcount" if !self.unconstrained => {
+                Ok(Value::Int(IntValue::canonical(false, 32, BigInt::zero())))
+            }
+            "array_refcount" | "vector_refcount" => Err(InterpretError::Unsupported(
+                "refcount in unconstrained code".to_string(),
+            )),
             #[cfg(feature = "bn254-crypto")]
             "multi_scalar_mul"
             | "embedded_curve_add"
@@ -73,7 +80,7 @@ impl<'p> Interpreter<'p> {
             {
                 super::bn254_crypto::call(name, args, return_type)
             }
-            // bn254's crypto without its solver, comptime-only meta builtins, refcount ops.
+            // bn254's crypto without its solver and the comptime-only meta builtins.
             other => Err(InterpretError::Unsupported(format!("intrinsic '{other}'"))),
         }
     }
@@ -198,8 +205,8 @@ fn vector_remove(args: Vec<Value>, location: Location) -> Result<Value, Interpre
 fn str_as_bytes(args: Vec<Value>) -> Result<Value, InterpretError> {
     let [value] = take(args)?;
     match value {
-        Value::Str(s) => Ok(Value::Array(
-            s.into_bytes()
+        Value::Str(bytes) => Ok(Value::Array(
+            bytes
                 .into_iter()
                 .map(|b| Value::Int(IntValue::canonical(false, 8, BigInt::from(b))))
                 .collect(),
@@ -219,11 +226,7 @@ fn array_as_str_unchecked(args: Vec<Value>) -> Result<Value, InterpretError> {
             .map_err(|_| InterpretError::Type("string byte out of range".to_string()))?;
         bytes.push(byte);
     }
-    // Noir strings may be non-UTF-8; ours is a Rust `String`, so tolerate that case.
-    let s = String::from_utf8(bytes).map_err(|e| {
-        InterpretError::Unsupported(format!("array_as_str_unchecked on non-UTF-8 bytes: {e}"))
-    })?;
-    Ok(Value::Str(s))
+    Ok(Value::Str(bytes))
 }
 
 /// Field decomposition into `limb_count` radix digits (faithful to Noir's `constant_to_radix`):
@@ -315,7 +318,34 @@ fn static_assert(args: &[Value], location: Location) -> Result<Value, InterpretE
                 Ok(Value::Unit)
             } else {
                 let message = match args.get(1) {
-                    Some(Value::Str(s) | Value::LossyStr(s)) => Some(s.clone()),
+                    Some(Value::Str(bytes)) => Some(String::from_utf8_lossy(bytes).into_owned()),
+                    Some(Value::FmtStr {
+                        fragments,
+                        captures,
+                    }) => {
+                        // Monomorphization appends each capture's printable type, then `true`.
+                        let Some((Value::Bool(true), metadata)) = args[2..].split_last() else {
+                            return Err(InterpretError::Internal(
+                                "static_assert format string has no type metadata".to_string(),
+                            ));
+                        };
+                        let types = metadata
+                            .iter()
+                            .map(|value| {
+                                let Value::Str(bytes) = value else {
+                                    return Err(InterpretError::Internal(
+                                        "static_assert capture type is not a string".to_string(),
+                                    ));
+                                };
+                                serde_json::from_slice(bytes).map_err(|error| {
+                                    InterpretError::Internal(format!(
+                                        "invalid static_assert capture type: {error}"
+                                    ))
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Some(super::eval::format_fmt_str(fragments, captures, &types)?)
+                    }
                     _ => None,
                 };
                 Err(InterpretError::AssertionFailed { location, message })
@@ -541,6 +571,28 @@ mod tests {
                 matches!(
                     interpreter.call_intrinsic(name, args, &array_type(1), Location::dummy()),
                     Err(InterpretError::Unsupported(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn refcounts_in_unconstrained_code_are_a_gap() {
+        use noirc_frontend::monomorphization::ast::Program;
+        use noirc_frontend::shared::Signedness;
+
+        let program = Program::default();
+        let mut interpreter = Interpreter::new(&program, FieldId::linked());
+        interpreter.unconstrained = true;
+        let u32_type = Type::Integer(Signedness::Unsigned, 32);
+        for name in ["array_refcount", "vector_refcount"] {
+            let array = vec![Value::Array(vec![u32v(1), u32v(2)])];
+            assert!(
+                matches!(
+                    interpreter.call_intrinsic(name, array, &u32_type, Location::dummy()),
+                    Err(InterpretError::Unsupported(message))
+                        if message == "refcount in unconstrained code"
                 ),
                 "{name}"
             );

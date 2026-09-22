@@ -6,6 +6,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::{One, Zero};
 
 use noirc_frontend::monomorphization::ast::FuncId;
+use noirc_frontend::token::FmtStrFragment;
 
 use super::error::InterpretError;
 
@@ -25,11 +26,13 @@ pub enum Value {
     Array(Vec<Value>),
     // Fields are shared cells so `&mut s.field` aliases; value reads `deep_copy` out.
     Tuple(Vec<Rc<RefCell<Value>>>),
-    Str(String),
-    /// A formatted string whose text is not what Noir prints: an interpolated struct or enum lost
-    /// its name in the mono AST. `print` may discard it and a call may forward it; storing it in a
-    /// binding is refused.
-    LossyStr(String),
+    /// A string's bytes, which need not be UTF-8; printing decodes them lossily, as Noir does.
+    Str(Vec<u8>),
+    /// Captured values, rendered with the assertion's type metadata to preserve aggregate names.
+    FmtStr {
+        fragments: Vec<FmtStrFragment>,
+        captures: Vec<Value>,
+    },
     Function(FuncId),
     // Shared cell. `auto_deref` = a `let mut`/mutable-param slot (loaded on a bare read); a plain
     // `&`/`&mut` reference is `false`.
@@ -129,22 +132,20 @@ impl Value {
         )
     }
 
-    /// Read tuple field `i` as an owned, unaliased value; auto-derefs a reference to a tuple.
+    /// Read tuple field `i` as an owned, unaliased value.
     pub fn tuple_field(&self, i: usize) -> Result<Value, InterpretError> {
         match self {
             Value::Tuple(cells) => cells
                 .get(i)
                 .map(|c| c.borrow().deep_copy())
                 .ok_or_else(|| InterpretError::Type(format!("tuple field {i} out of bounds"))),
-            Value::Ref(cell, _) => cell.borrow().tuple_field(i),
             other => Err(InterpretError::Type(format!(
                 "cannot extract field from {other:?}"
             ))),
         }
     }
 
-    /// Follow a reference one level. A non-`Ref` is a reference shape we don't model (nested or
-    /// multi-level) — tolerated as `Unsupported`, not a miscompile.
+    /// Follow a reference one level, copying values while preserving nested references.
     pub fn deref(&self) -> Result<Value, InterpretError> {
         match self {
             Value::Ref(cell, _) => Ok(cell.borrow().deep_copy()),
@@ -166,6 +167,13 @@ impl Value {
                     .collect(),
             ),
             Value::Array(elements) => Value::Array(elements.iter().map(Value::deep_copy).collect()),
+            Value::FmtStr {
+                fragments,
+                captures,
+            } => Value::FmtStr {
+                fragments: fragments.clone(),
+                captures: captures.iter().map(Value::deep_copy).collect(),
+            },
             other => other.clone(),
         }
     }
