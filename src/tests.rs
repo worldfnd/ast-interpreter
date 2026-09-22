@@ -763,6 +763,10 @@ fn interprets_stdlib_fixtures() {
         ("interp_hash_limbs", Value::Bool(false)),
         ("interp_field_lt", Value::Bool(true)),
         ("interp_derive_eq_hash", Value::Bool(false)),
+        (
+            "interp_refcount_constrained",
+            Value::Int(IntValue::canonical(false, 32, BigInt::from(0))),
+        ),
     ] {
         assert_fixture_return(name, expected);
     }
@@ -1056,6 +1060,7 @@ fn oracle_matches_interpreter_smoke() {
         "interp_refs_nested_field",
         "interp_refs_double_deref_alias",
         "interp_refs_offset_receiver",
+        "interp_refcount_constrained",
         "interp_match_enum",
         "interp_match_int",
         "intrinsic_slice_ops",

@@ -222,6 +222,7 @@ const PROJECTION_INVARIANT_FIXTURES: &[&str] = &[
     "interp_inputs_mixed",
     "interp_refs_call_chain",
     "interp_refs_offset_receiver",
+    "interp_refcount_constrained",
     "interp_match_enum",
     "interp_match_int",
     "interp_casts_above_modulus",

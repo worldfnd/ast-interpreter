@@ -64,6 +64,13 @@ impl<'p> Interpreter<'p> {
             "ecdsa_secp256r1" => ecdsa_verify(args, blackbox_solver::ecdsa_secp256r1_verify),
             // Printing does not touch the value a program computes.
             "print" => Ok(Value::Unit),
+            // Refcounts are Brillig-specific; constrained code always returns zero.
+            "array_refcount" | "vector_refcount" if !self.unconstrained => {
+                Ok(Value::Int(IntValue::canonical(false, 32, BigInt::zero())))
+            }
+            "array_refcount" | "vector_refcount" => Err(InterpretError::Unsupported(
+                "refcount in unconstrained code".to_string(),
+            )),
             #[cfg(feature = "bn254-crypto")]
             "multi_scalar_mul"
             | "embedded_curve_add"
@@ -73,7 +80,7 @@ impl<'p> Interpreter<'p> {
             {
                 super::bn254_crypto::call(name, args, return_type)
             }
-            // bn254's crypto without its solver, comptime-only meta builtins, refcount ops.
+            // bn254's crypto without its solver and the comptime-only meta builtins.
             other => Err(InterpretError::Unsupported(format!("intrinsic '{other}'"))),
         }
     }
@@ -541,6 +548,28 @@ mod tests {
                 matches!(
                     interpreter.call_intrinsic(name, args, &array_type(1), Location::dummy()),
                     Err(InterpretError::Unsupported(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn refcounts_in_unconstrained_code_are_a_gap() {
+        use noirc_frontend::monomorphization::ast::Program;
+        use noirc_frontend::shared::Signedness;
+
+        let program = Program::default();
+        let mut interpreter = Interpreter::new(&program, FieldId::linked());
+        interpreter.unconstrained = true;
+        let u32_type = Type::Integer(Signedness::Unsigned, 32);
+        for name in ["array_refcount", "vector_refcount"] {
+            let array = vec![Value::Array(vec![u32v(1), u32v(2)])];
+            assert!(
+                matches!(
+                    interpreter.call_intrinsic(name, array, &u32_type, Location::dummy()),
+                    Err(InterpretError::Unsupported(message))
+                        if message == "refcount in unconstrained code"
                 ),
                 "{name}"
             );
