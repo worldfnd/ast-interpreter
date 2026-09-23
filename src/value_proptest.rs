@@ -2,7 +2,7 @@
 //! arithmetic, casts, shifts, division/modulo, and integer-to-field encoding across supported
 //! fields. Scope is value logic only — no ASTs, interpreter, or Noir project compilation.
 
-use acvm::FieldConfig;
+use acvm::{FieldConfig, FieldId};
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
 use proptest::prelude::*;
@@ -173,18 +173,21 @@ proptest! {
         );
     }
 
-    /// Field encoding preserves the bit pattern or rejects the source width.
+    /// Field encoding preserves the bit pattern or rejects the source width, under each field.
     #[test]
     fn p4_field_encoding_checks_source_width((signed, bits, raw) in int_type_and_raw()) {
         let iv = IntValue::canonical(signed, bits, raw);
 
-        let config = FieldConfig::linked();
-        match iv.try_to_field(config) {
-            Some(field) => {
-                prop_assert!(config.fits_unsigned(bits));
-                prop_assert_eq!(field.to_bigint(), iv.unsigned_repr());
+        for field in [FieldId::Bn254, FieldId::Goldilocks] {
+            let config = FieldConfig::new(field);
+            match iv.try_to_field(config) {
+                Some(value) => {
+                    prop_assert!(config.fits_unsigned(bits));
+                    prop_assert_eq!(value.field(), field);
+                    prop_assert_eq!(value.to_bigint(), iv.unsigned_repr());
+                }
+                None => prop_assert!(!config.fits_unsigned(bits)),
             }
-            None => prop_assert!(!config.fits_unsigned(bits)),
         }
     }
 
