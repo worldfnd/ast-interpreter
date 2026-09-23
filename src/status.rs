@@ -613,19 +613,12 @@ fn swept_field() -> FieldId {
 }
 
 /// `make sweep FIELD=<field>`: record the corpus and the fixtures under `FIELD` into
-/// `target/status/<field>.json`.
-///
-/// Requires a build linked against `FIELD` because the ABI parser uses the linked field.
+/// `target/status/<field>.json`. One build sweeps every field whose elements its linked element
+/// can hold, since the compiler and the ABI parser both take the field at run time.
 #[test]
 #[ignore = "status: run `make sweep FIELD=<field>`"]
 fn dump_records() {
     let field = swept_field();
-    assert_eq!(
-        field,
-        FieldId::linked(),
-        "sweeping {field} needs a build linked against it; the ABI parser reads inputs in {}",
-        FieldId::linked()
-    );
     let checkout = noir_checkout();
     check_checkout_matches_stamp(&checkout).unwrap_or_else(|e| panic!("{e}"));
     let corpus = corpus_dir();

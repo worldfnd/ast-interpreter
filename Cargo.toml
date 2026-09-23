@@ -11,8 +11,7 @@ noirc_errors.workspace = true
 noirc_frontend.workspace = true
 noirc_printable_type.workspace = true
 
-# bn254's curve, Pedersen-generator and Poseidon2 black boxes; only a bn254 build holds their
-# field elements.
+# bn254's curve, Pedersen-generator and Poseidon2 black boxes.
 bn254_blackbox_solver = { workspace = true, optional = true }
 # `DiffValue` serializes `BigInt` payloads in dump JSON.
 num-bigint = { version = "0.5", features = ["serde"] }
@@ -41,14 +40,7 @@ proptest = "1"
 default = ["bn254-crypto"]
 
 # Route the embedded-curve, Pedersen-generator and Poseidon2 built-ins to `bn254_blackbox_solver`.
-# A `goldilocks` build must disable it: `--no-default-features --features goldilocks`.
 bn254-crypto = ["dep:bn254_blackbox_solver"]
-
-# Build the pinned Noir stack with Goldilocks.
-goldilocks = [
-    "noirc_frontend/goldilocks",
-    "noirc_driver/goldilocks",
-]
 
 # Integration oracle against the Mavros compiler. Fails to build with a clear message until the
 # mavros-compiler dependency is available; becomes ["dep:mavros-compiler"] then.
