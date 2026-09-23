@@ -12,8 +12,11 @@
 //!
 //! ```sh
 //! MAVROS_ORACLE_CORPUS=<a copy of a test_programs directory> MAVROS_ORACLE_FIELD=bn254 \
-//!     cargo test --features mavros-oracle --lib mavros_oracle::sweep -- --ignored --nocapture
+//!     cargo test --release --features mavros-oracle --lib mavros_oracle::sweep -- --ignored --nocapture
 //! ```
+//!
+//! The release build matters: a debug build's stack frames and speed make the heaviest programs
+//! (ECDSA, the 2^17-gate benchmarks) overflow the child's stack or run past the budget.
 //!
 //! `MAVROS_ORACLE_CORPUS` names a copy, not a checkout, because Mavros writes `mavros_debug/`
 //! into every package it compiles. `MAVROS_ORACLE_FIELD` defaults to bn254; `MAVROS_ORACLE_JOBS`
