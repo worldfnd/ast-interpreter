@@ -36,12 +36,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Link the ABI parser against the field being swept.
+        # Each leg sweeps its field; the goldilocks leg also tests the build without bn254 crypto.
         include:
           - field: bn254
             features: ""
           - field: goldilocks
-            features: --no-default-features --features goldilocks
+            features: --no-default-features
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

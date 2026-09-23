@@ -10,11 +10,6 @@ compile_error!(
     "the `mavros-oracle` feature needs the mavros-compiler dependency, blocked on the Mavros Goldilocks branch"
 );
 
-#[cfg(all(feature = "bn254-crypto", feature = "goldilocks"))]
-compile_error!(
-    "`bn254-crypto` holds bn254 field elements; build `goldilocks` with `--no-default-features`"
-);
-
 #[cfg(feature = "bn254-crypto")]
 mod bn254_crypto;
 mod diff;

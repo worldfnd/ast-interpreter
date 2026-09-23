@@ -1,18 +1,20 @@
 //! Bridge `Prover.toml` inputs into interpreter [`Value`]s.
 //!
-//! Noir's ABI parser yields an [`InputValue`] tree keyed by parameter name; we map each value onto
-//! the monomorphized parameter [`Type`], using the matching [`AbiType`] for the struct field
-//! ordering the lowered `Type::Tuple` loses. An integer input arrives as its fixed-width two's
-//! complement pattern; the parser has already refused any value whose pattern does not fit the
-//! field, so decoding that pattern is exact.
+//! Noir's ABI parser reads every value in the program's field and yields an [`InputValue`] tree
+//! keyed by parameter name; its scalar codec gives each leaf's element in that field, and we map
+//! each value onto the monomorphized parameter [`Type`], using the matching [`AbiType`] for the
+//! struct field ordering the lowered `Type::Tuple` loses. An integer input arrives as its
+//! fixed-width two's complement pattern; the parser has already refused any value whose pattern
+//! does not fit the field, so decoding that pattern is exact.
 
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use acvm::{AcirField, FieldId, FieldValue};
+use acvm::{FieldConfig, FieldId, FieldValue};
+use num_bigint::BigInt;
 
 use noirc_abi::{
-    Abi, AbiType, MAIN_RETURN_NAME,
+    Abi, AbiType, MAIN_RETURN_NAME, Sign, encode_scalar,
     input_parser::{Format, InputValue},
 };
 use noirc_frontend::monomorphization::ast::{Program, Type};
@@ -20,26 +22,20 @@ use noirc_frontend::monomorphization::ast::{Program, Type};
 use super::error::InterpretError;
 use super::value::{IntValue, Value};
 
-/// Parse `toml_src` against `abi` and bind each value to `main`'s parameters in order.
-///
-/// `field` must match both the compiled program and [`FieldId::linked`]. The ABI parser resolves
-/// native `-1` and quoted `p - 1` to the same linked-field element, losing the spelling needed to
-/// interpret them in another field. Cross-field parsing is rejected until the codec supports it.
+/// Parse `toml_src` against `abi` in `field`, which must be the field the program was compiled
+/// under, and bind each value to `main`'s parameters in order.
 pub fn inputs_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
     field: FieldId,
 ) -> Result<Vec<Value>, InterpretError> {
-    require_linked_field(field)?;
     // An unrepresentable recorded return must not prevent parsing the inputs.
     let parameters_only = Abi {
         return_type: None,
         ..abi.clone()
     };
-    let map = Format::Toml
-        .parse(toml_src, &parameters_only)
-        .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
+    let map = parse_prover_toml(toml_src, &parameters_only, field)?;
 
     let main = super::main_function_of(program)?;
 
@@ -54,25 +50,22 @@ pub fn inputs_from_prover_toml(
         let input = map
             .get(name)
             .ok_or_else(|| InterpretError::Internal(format!("no parsed input for '{name}'")))?;
-        inputs.push(value_from_input(input, abi_type, typ)?);
+        inputs.push(value_from_input(input, abi_type, typ, field)?);
     }
     Ok(inputs)
 }
 
 /// Decode the expected `main` return value recorded in `Prover.toml` (the `return = ...` field), if
-/// present. Noir's test corpus records this as the program's known-correct output, so it is a
-/// ground-truth reference the interpreter's result can be checked against.
-/// Requires the linked field, as [`inputs_from_prover_toml`] does.
+/// present, in `field` as [`inputs_from_prover_toml`] does. Noir's test corpus records this as the
+/// program's known-correct output, so it is a ground-truth reference the interpreter's result can
+/// be checked against.
 pub fn expected_return_from_prover_toml(
     program: &Program,
     abi: &Abi,
     toml_src: &str,
     field: FieldId,
 ) -> Result<Option<Value>, InterpretError> {
-    require_linked_field(field)?;
-    let map = Format::Toml
-        .parse(toml_src, abi)
-        .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))?;
+    let map = parse_prover_toml(toml_src, abi, field)?;
     let Some(input) = map.get(MAIN_RETURN_NAME) else {
         return Ok(None);
     };
@@ -86,17 +79,22 @@ pub fn expected_return_from_prover_toml(
                 "Prover.toml parsed a return value but the ABI declares no return type".to_string(),
             )
         })?;
-    Ok(Some(value_from_input(input, abi_type, &main.return_type)?))
+    Ok(Some(value_from_input(
+        input,
+        abi_type,
+        &main.return_type,
+        field,
+    )?))
 }
 
-fn require_linked_field(field: FieldId) -> Result<(), InterpretError> {
-    if field != FieldId::linked() {
-        return Err(InterpretError::InvalidInput(format!(
-            "Prover.toml parsing for {field} requires a build linked against it; this build uses {}",
-            FieldId::linked()
-        )));
-    }
-    Ok(())
+fn parse_prover_toml(
+    toml_src: &str,
+    abi: &Abi,
+    field: FieldId,
+) -> Result<noirc_abi::InputMap, InterpretError> {
+    Format::Toml
+        .parse(toml_src, abi, FieldConfig::new(field))
+        .map_err(|e| InterpretError::InvalidInput(format!("failed to parse Prover.toml: {e}")))
 }
 
 /// Check the invariants the interpreter relies on but cannot restore from a caller-built [`Value`]:
@@ -164,34 +162,56 @@ fn check_int(int: &IntValue) -> Result<(), InterpretError> {
     Ok(())
 }
 
-/// Map one ABI [`InputValue`] onto a monomorphized [`Type`], producing a [`Value`]. `abi_type`
-/// supplies the struct field ordering that the lowered `Type::Tuple` drops. Reused by the executor
-/// oracle to decode Noir's ACVM return into a comparable `Value`.
+/// Whether the ABI describes the scalar `typ` the program declares. Both come from one compilation,
+/// so a mismatch is an internal error rather than a value checked against the wrong type.
+fn scalar_abi_matches(abi_type: &AbiType, typ: &Type) -> bool {
+    match (abi_type, typ) {
+        (AbiType::Field, Type::Field) | (AbiType::Boolean, Type::Bool) => true,
+        (AbiType::Integer { sign, width }, Type::Integer(signedness, bits)) => {
+            (*sign == Sign::Signed) == signedness.is_signed() && width == bits
+        }
+        _ => false,
+    }
+}
+
+/// Map one ABI [`InputValue`] read in `field` onto a monomorphized [`Type`], producing a [`Value`].
+/// `abi_type` supplies the struct field ordering that the lowered `Type::Tuple` drops. Reused by
+/// the executor oracle to decode Noir's ACVM return into a comparable `Value`.
 pub(crate) fn value_from_input(
     input: &InputValue,
     abi_type: &AbiType,
     typ: &Type,
+    field: FieldId,
 ) -> Result<Value, InterpretError> {
+    // The element of a scalar, checked against its type and the field: this also guards values
+    // the parser never saw, such as the ACVM returns the executor oracle decodes here.
+    let element = || {
+        encode_scalar(input, abi_type, FieldConfig::new(field)).map_err(|e| {
+            InterpretError::InvalidInput(format!("input does not fit {abi_type:?}: {e}"))
+        })
+    };
     match (input, typ) {
-        (InputValue::Field(field), Type::Field) => {
-            Ok(Value::Field(FieldValue::from_linked_element(*field)))
-        }
-        (InputValue::Field(field), Type::Integer(signedness, bits)) => {
-            let width = *bits;
-            let raw = FieldValue::from_linked_element(*field).to_bigint();
-            // Guards values the parser never saw: the executor oracle decodes ACVM returns here.
-            if raw.bits() > u64::from(width) {
-                return Err(InterpretError::InvalidInput(format!(
-                    "integer input does not fit a {width}-bit type"
-                )));
-            }
-            Ok(Value::Int(IntValue::canonical(
-                signedness.is_signed(),
-                width,
-                raw,
+        (InputValue::Field(_), Type::Field | Type::Integer(..) | Type::Bool)
+            if !scalar_abi_matches(abi_type, typ) =>
+        {
+            Err(InterpretError::Internal(format!(
+                "ABI type {abi_type:?} does not describe {typ:?}"
             )))
         }
-        (InputValue::Field(field), Type::Bool) => Ok(Value::Bool(!field.is_zero())),
+        (InputValue::Field(_), Type::Field) => {
+            let element = element()?;
+            FieldValue::try_from_biguint(element, field)
+                .map(Value::Field)
+                .ok_or_else(|| {
+                    InterpretError::Internal(
+                        "an encoded element is not below its modulus".to_string(),
+                    )
+                })
+        }
+        (InputValue::Field(_), Type::Integer(signedness, bits)) => Ok(Value::Int(
+            IntValue::canonical(signedness.is_signed(), *bits, BigInt::from(element()?)),
+        )),
+        (InputValue::Field(_), Type::Bool) => Ok(Value::Bool(element()? == 1u8.into())),
         (InputValue::Vec(elements), Type::Array(length, element_type)) => {
             let AbiType::Array {
                 length: abi_length,
@@ -215,7 +235,7 @@ pub(crate) fn value_from_input(
             }
             let values = elements
                 .iter()
-                .map(|element| value_from_input(element, element_abi, element_type))
+                .map(|element| value_from_input(element, element_abi, element_type, field))
                 .collect::<Result<_, _>>()?;
             Ok(Value::Array(values))
         }
@@ -244,7 +264,7 @@ pub(crate) fn value_from_input(
                 .iter()
                 .zip(types)
                 .zip(elements)
-                .map(|((field_abi, typ), element)| value_from_input(element, field_abi, typ))
+                .map(|((field_abi, typ), element)| value_from_input(element, field_abi, typ, field))
                 .collect::<Result<_, _>>()?;
             Ok(Value::tuple(values))
         }
@@ -270,7 +290,7 @@ pub(crate) fn value_from_input(
                     let value = map.get(name).ok_or_else(|| {
                         InterpretError::Internal(format!("ABI struct has no field '{name}'"))
                     })?;
-                    value_from_input(value, field_abi, typ)
+                    value_from_input(value, field_abi, typ, field)
                 })
                 .collect::<Result<_, _>>()?;
             Ok(Value::tuple(values))

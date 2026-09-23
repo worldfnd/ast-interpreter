@@ -7,8 +7,9 @@ arrays, tuples, and structs. Cross-field comparisons ignore differences in `Fiel
 
 A `Field` value carries the field it belongs to, and the interpreter takes its field from the label
 the monomorphized program was compiled under, so one build runs a program under any supported
-field. What the crate is *linked* against still matters for the parts that hold an
-`acvm::FieldElement`: the ABI input parser and the ACVM executor oracle.
+field. The ABI input parser reads values in that field too; it holds them in the linked
+`acvm::FieldElement`, so a bn254 build parses bn254 and Goldilocks inputs alike. Only the ACVM
+executor oracle computes in the linked field, bn254.
 
 ## Using it
 
@@ -20,10 +21,9 @@ ast-interpreter = { git = "https://github.com/worldfnd/ast-interpreter.git", rev
 Use `interpret` for self-checking programs with no inputs, or `interpret_with_inputs` when `main` takes
 arguments. Both take the `FieldId` the program was compiled under, which
 `MonomorphizationOutput::field_id` records. For `Prover.toml` inputs, use `inputs_from_prover_toml`
-and `expected_return_from_prover_toml`. These helpers require that field to match
-`FieldId::linked()` because the ABI parser uses the linked field. For another field, construct
-`Value` inputs directly; every `FieldValue` must belong to the program's field, and every `IntValue`
-must be a value of the width and signedness it declares.
+and `expected_return_from_prover_toml`, which read the values in that field. Inputs built directly
+as `Value`s must follow the same rules: every `FieldValue` must belong to the program's field, and
+every `IntValue` must be a value of the width and signedness it declares.
 
 Crates that pass Noir AST values into this interpreter must use the same pinned `noirc_frontend` and
 `acvm` sources, spelled the same way. Cargo keys a git dependency on the URL *and* the reference, so
@@ -31,8 +31,8 @@ Crates that pass Noir AST values into this interpreter must use the same pinned 
 error until the two halves meet. `acvm::FieldElement` is selected at compile time.
 
 The `bn254-crypto` feature, on by default, routes the embedded-curve, Pedersen-generator and
-Poseidon2 built-ins to `bn254_blackbox_solver`; a `goldilocks` build must disable it with
-`--no-default-features`, since only a bn254 build holds those field elements.
+Poseidon2 built-ins to `bn254_blackbox_solver`; they take bn254 values only, which is the one field
+where Noir's standard library reaches them.
 
 The `mavros-oracle` feature is a placeholder. Its `mavros-compiler` dependency is commented out, so
 enabling the feature fails the build with a `compile_error!` saying so.
@@ -48,7 +48,7 @@ Rust 1.89.0 is pinned in `rust-toolchain.toml`. Run these commands from this dir
 
 ```sh
 cargo build
-make test            # Tests under bn254 and Goldilocks (the latter with --no-default-features)
+make test            # Both feature builds test bn254 and Goldilocks programs
 ```
 
 ## STATUS.md
@@ -70,9 +70,9 @@ the compiler pin in `Cargo.toml`, and the corpus and its path dependencies must 
 Change the compiler pin and interpreter code in separate PRs unless a compiler API change
 requires both.
 
-`tests::the_stdlib_tests_pass_under_the_linked_field` runs every argument-less `#[test]` of the
-standard library through the interpreter; one it cannot run fails it, except bn254's own crypto
-when `bn254-crypto` is off.
+`tests::the_stdlib_tests_pass_under_bn254` and `tests::the_stdlib_tests_pass_under_goldilocks` run
+every argument-less `#[test]` of the standard library through the interpreter under their field;
+one it cannot run fails them, except bn254's own crypto when `bn254-crypto` is off.
 `tests::oracle_survey_execution_success` separately compares the interpreter with Noir's executor;
 its doc comment has the command. Unsupported intrinsics, such as a reference count taken in
 unconstrained code, remain explicit coverage gaps.

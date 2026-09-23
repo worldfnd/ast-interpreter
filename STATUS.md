@@ -1,12 +1,12 @@
 # Status
 
-Every program of Noir's `execution_success` corpus and this crate's fixtures, compiled and interpreted under both fields at the pinned compiler revision. `compile`, `run` and `return` are the frontend, the interpreter and the check against the `return` recorded in `Prover.toml` (exact under bn254; `Field` values ignored under goldilocks, whose corpus records bn254 values): ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two sides: `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field property the program's inputs, recorded return, constants or casts need; `field-dependent`, allowlisted as field-dependent by design; `both-sides`, neither side ran it; `unexpected`, a one-sided gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest. `AST` says whether both monomorphized programs project to the same hash. `Record` fingerprints the row's underlying records, so any change shows here even when the glyphs do not. Regenerate with `make status`; CI fails when a fresh run differs.
+Every program of Noir's `execution_success` corpus and this crate's fixtures, compiled and interpreted under both fields at the pinned compiler revision. `compile`, `run` and `return` are the frontend, the interpreter and the check against the `return` recorded in `Prover.toml` (exact under bn254; `Field` values ignored under goldilocks, whose corpus records bn254 values): ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two sides: `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field property the program's entry point, inputs, recorded return, constants or casts need; `field-dependent`, allowlisted as field-dependent by design; `both-sides`, neither side ran it; `unexpected`, a one-sided gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest. `AST` says whether both monomorphized programs project to the same hash. `Record` fingerprints the row's underlying records, so any change shows here even when the glyphs do not. Regenerate with `make status`; CI fails when a fresh run differs.
 
 | provenance | value |
 | --- | --- |
-| noir_rev | 02c874710719c1d43f2cf16e7181427714ac73b8 |
+| noir_rev | 225db3e18f0ffaeeb3919a668f78b9e9c867b41f |
 | corpus_hash | 3ad62c2ccd6466555cdc14ba75992a0fdbb31beb14fec9fc46f62680576ebc7a |
-| programs | 509 corpus, 47 fixtures |
+| programs | 509 corpus, 46 fixtures |
 | toolchain | rustc 1.89.0 (29483883e 2025-08-04) |
 | format | dump 5, projection 3 |
 
@@ -53,9 +53,9 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | binary_operator_overloading | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | d47dbfa9 |
 | bit_and | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 16021c6a |
 | bit_not | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 6e088582 |
-| bit_shifts_comptime | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 35e22f71 |
-| bit_shifts_runtime | ✅ | ✅ | ➖ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 721bbb0e |
-| bit_shifts_u128 | ✅ | ✅ | ➖ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 96fa2129 |
+| bit_shifts_comptime | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | be9805f6 |
+| bit_shifts_runtime | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 0be59f48 |
+| bit_shifts_u128 | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 895ff2e5 |
 | blake3 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 6e8e252f |
 | bool_not | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | e5eff271 |
 | bool_or | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 74810c56 |
@@ -72,7 +72,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | brillig_block_mutable_reference_let_chain_long_regression | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 8da9dfdd |
 | brillig_block_mutable_reference_let_chain_regression | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | e10c0605 |
 | brillig_block_mutable_reference_regression | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | ac968c5a |
-| brillig_block_parameter_liveness | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 59ce4743 |
+| brillig_block_parameter_liveness | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 3778c2d2 |
 | brillig_calls | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 39b5f964 |
 | brillig_calls_array | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 5e313a5f |
 | brillig_calls_conditionals | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | bbb258a2 |
@@ -99,7 +99,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | brillig_recursive_main_indirect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 64847fa8 |
 | brillig_uninitialized_arrays | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6941ddd2 |
 | cast_bool | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 4c4dc993 |
-| cast_regression_7776 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟡 field-dependent | ✅ | 2d4c8924 |
+| cast_regression_7776 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | fc1e1a82 |
 | cast_signed_to_u1 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 18a39f83 |
 | cast_to_u128 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | e1ac89c1 |
 | chained_associated_type_in_signature | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 32add1d1 |
@@ -164,43 +164,42 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/interp_closures | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 42450ade |
 | fixtures/interp_derive_eq_hash | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 28c69462 |
 | fixtures/interp_field_lt | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | bfa709b3 |
-| fixtures/interp_hash_limbs | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 80a5317e |
+| fixtures/interp_hash_limbs | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | e91c024f |
 | fixtures/interp_inputs_i32 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | af422c29 |
-| fixtures/interp_inputs_i64 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6930bcf3 |
+| fixtures/interp_inputs_i64 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | c1dd9e68 |
 | fixtures/interp_inputs_mixed | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | fea9c5ea |
 | fixtures/interp_inputs_struct | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | f11a52f4 |
-| fixtures/interp_inputs_u64 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 27e3d27f |
+| fixtures/interp_inputs_u64 | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 9e7c4a4d |
 | fixtures/interp_intrinsic_hints | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 4e1a5fab |
 | fixtures/interp_match_enum | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 5ae2b058 |
 | fixtures/interp_match_int | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 69812da6 |
 | fixtures/interp_refcount_constrained | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | a160b8ef |
-| fixtures/interp_refs_call_chain | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | dd14b65a |
+| fixtures/interp_refs_call_chain | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | de0ecb0f |
 | fixtures/interp_refs_double_deref_alias | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 8700182b |
 | fixtures/interp_refs_nested_field | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 01c844d2 |
 | fixtures/interp_refs_offset_receiver | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 8ec11ba0 |
 | fixtures/interp_refs_struct_field | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | b23c1fda |
-| fixtures/interp_return_i64 | ✅ | ✅ | ✅ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 78c4e88d |
+| fixtures/interp_return_i64 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | d98a2d5c |
 | fixtures/interp_str_bytes | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6a1a68e4 |
 | fixtures/interp_width_10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6df592ef |
-| fixtures/interp_width_126 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | ce043c30 |
-| fixtures/interp_width_128 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 9e9421ba |
-| fixtures/interp_width_16384 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | e11541c8 |
+| fixtures/interp_width_126 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 41d0e102 |
+| fixtures/interp_width_128 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | a7668db8 |
+| fixtures/interp_width_16384 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 864c8180 |
 | fixtures/interp_width_2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 70207f1e |
 | fixtures/interp_width_33 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 88839512 |
 | fixtures/interp_width_34 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 7c1499ec |
 | fixtures/interp_width_36 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 88df8be2 |
-| fixtures/interp_width_66 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | c40f11cc |
-| fixtures/interp_wrapping_ops | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 567bc15b |
+| fixtures/interp_width_66 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | c7f7c45d |
+| fixtures/interp_wrapping_ops | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 5d2c9c63 |
 | fixtures/intrinsic_conversions | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | a6992c0a |
 | fixtures/intrinsic_range_constraint | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ❌ | 6d8b9fe6 |
 | fixtures/intrinsic_slice_ops | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 99181296 |
 | fixtures/intrinsic_to_bytes | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ❌ | 16f8d089 |
 | fixtures/neg_assert_fail | ✅ | ❌ | ➖ | ✅ | ❌ | ➖ | ✅ equal | ✅ | fa98970b |
 | fixtures/neg_assert_fmt_msg | ✅ | ❌ | ➖ | ✅ | ❌ | ➖ | ✅ equal | ✅ | d8f9ae3f |
-| fixtures/neg_interp_cast_u64_to_field | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | c87bbec0 |
-| fixtures/neg_interp_inputs_i64 | ✅ | ✅ | ➖ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 5ad16352 |
-| fixtures/neg_reachable_error | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | 7c105c13 |
-| fixtures/neg_wide_input_u66 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 0d32c911 |
+| fixtures/neg_interp_cast_u64_to_field | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | e9d03c0b |
+| fixtures/neg_reachable_error | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | 27f038d8 |
+| fixtures/neg_wide_input_u66 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 6ead5a2b |
 | fixtures/neg_width_above_max | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | f5d6d74e |
 | fixtures/neg_width_one | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | ef886fe0 |
 | fixtures/neg_width_unresolved | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | 890885ed |
@@ -244,11 +243,11 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | lambda_from_dynamic_if | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 1f6dc6a8 |
 | lambda_from_global_array | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 77a0e67f |
 | lambda_from_global_tuple | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 5fe7c58f |
-| lambda_taking_lambda_regression_8543 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 67272726 |
-| lambda_taking_lambda_with_variant | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 072b0fd6 |
-| large_nested_array_merge_loop | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 6391e62a |
+| lambda_taking_lambda_regression_8543 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 80ef2022 |
+| lambda_taking_lambda_with_variant | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | a8b1481d |
+| large_nested_array_merge_loop | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 76f7d3bd |
 | large_nested_array_multi_field_merge | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | d05d92d8 |
-| large_nested_array_multi_field_merge_u64 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | cb7da01e |
+| large_nested_array_multi_field_merge_u64 | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | d709e0af |
 | last_uses_regression_8935 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 48eb57ba |
 | licm_bug_inverted_loop | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | ae803d5a |
 | local_module_does_not_conflict_with_debugger | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | faf81288 |
@@ -334,7 +333,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | regression_10977 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 6c99a42f |
 | regression_11048 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 52e91b60 |
 | regression_11134 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 9ea5f826 |
-| regression_11294 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 2e205403 |
+| regression_11294 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 7485ee13 |
 | regression_11402 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 7ff1f2b0 |
 | regression_11440 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | c9acd03c |
 | regression_1144_1169_2399_6609 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | abdee4ff |
@@ -350,7 +349,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | regression_12467 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6ab4aec4 |
 | regression_12467_2 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | c28462b4 |
 | regression_12468 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | cd1d8645 |
-| regression_12472 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 311ad854 |
+| regression_12472 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 689080a2 |
 | regression_12473 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 780329bb |
 | regression_12475 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | bf20431d |
 | regression_12494 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 8aa316bd |
@@ -390,21 +389,21 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | regression_7612 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 73426545 |
 | regression_7744 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 field-dependent | ➖ | 43b54c40 |
 | regression_7836 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | f6834d1d |
-| regression_7962 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | e61939d8 |
-| regression_8009 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 25f8988e |
+| regression_7962 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | ed657739 |
+| regression_8009 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | bff3d608 |
 | regression_8011 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | a07e46f4 |
 | regression_8174 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 73a5ba44 |
 | regression_8210 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 73277c2f |
 | regression_8212 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 6ed57ff4 |
 | regression_8235 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 436194bf |
 | regression_8236 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 7222e791 |
-| regression_8261 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 7d674806 |
+| regression_8261 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | b8db2fb9 |
 | regression_8305 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 55ba263d |
 | regression_8329 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 76e6401b |
-| regression_8519 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 field-dependent | ✅ | c54ede6f |
+| regression_8519 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | b0722373 |
 | regression_8558 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | bba7ea68 |
 | regression_8662 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 2765cea8 |
-| regression_8726 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 9275d49b |
+| regression_8726 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 090b253e |
 | regression_8729 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 814a938f |
 | regression_8739 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | ed40ccf4 |
 | regression_8755 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 37e0b1ca |
@@ -437,7 +436,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | regression_9496 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 741cf8bb |
 | regression_9538 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | e23750f6 |
 | regression_9541 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 4b491c60 |
-| regression_9544 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 2ec1344c |
+| regression_9544 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 23977f49 |
 | regression_9546 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 1d1c9ad8 |
 | regression_9578 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 68f35b55 |
 | regression_9593 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 12c23d1e |
@@ -452,7 +451,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | regression_9888 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | de7fa56d |
 | regression_9907 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 40a887c0 |
 | regression_9971 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 43f2e9ec |
-| regression_brillig_const_fold_self_dedup | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 0e2b8c74 |
+| regression_brillig_const_fold_self_dedup | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 28e45e1d |
 | regression_brillig_ref_deref_crash | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | fc27cd42 |
 | regression_capacity_tracker | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 682ca9d9 |
 | regression_claude_1019 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ❌ | 06fe1fda |
@@ -473,7 +472,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | regression_noir_claude_1365 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | c3cdab2c |
 | regression_nrsec_903 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 8b87dbe0 |
 | regression_oob_constant_tuple_array_get | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 78945422 |
-| regression_struct_array_conditional | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 34d2e294 |
+| regression_struct_array_conditional | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | b0e4bb2f |
 | regression_truncate_unchecked_sub | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 44ab7595 |
 | regression_unroll_body_break | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 8e0e4c8c |
 | regression_unsafe_no_predicates | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 3fcc6a92 |
@@ -481,7 +480,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | regression_while_condition_alias | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | b2d03ba6 |
 | regression_while_condition_break | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 1308b67f |
 | return_twice | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6e364263 |
-| shift_left_rhs_value_casted_from_smaller_type | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | d5cc341b |
+| shift_left_rhs_value_casted_from_smaller_type | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | f3a36269 |
 | shift_right_overflow | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | fbc46279 |
 | shl_signed_regression_9661 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | cc348665 |
 | side_effects_constrain_array | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 90a97d74 |
@@ -494,7 +493,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | signed_inactive_division_by_zero | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | bafb162f |
 | signed_integer_or_max | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 53f23936 |
 | signed_overflow_in_else_regression_8617 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 73d29d4d |
-| signed_truncation | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 7899b82d |
+| signed_truncation | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 82337c43 |
 | simple_2d_array | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | e7a9ef6a |
 | simple_add_and_ret_arr | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 0ec443b5 |
 | simple_array_param | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 3ac8caeb |
@@ -518,7 +517,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | submodules | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 80a88794 |
 | to_be_bytes | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 field-dependent | ❌ | b005a21c |
 | to_bytes_consistent | ✅ | ✅ | ➖ | ✅ | ❌ | ➖ | 🟡 field-dependent | ❌ | 9ba2d61f |
-| to_bytes_integration | ✅ | ✅ | ➖ | ✅ | ❌ | ➖ | 🟡 predicted | ❌ | 17af671e |
+| to_bytes_integration | ✅ | ✅ | ➖ | ✅ | ❌ | ➖ | 🟡 predicted | ❌ | e2d5d811 |
 | to_le_bytes | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 field-dependent | ❌ | cd15bdd3 |
 | trait_as_return_type | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 2612206a |
 | trait_associated_constant | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | cdd5d521 |
@@ -529,7 +528,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | tuples | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 591b7fc1 |
 | two_array_chain_mutation | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 0fd9e149 |
 | type_aliases | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 7c596429 |
-| u128_type | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 04e1d379 |
+| u128_type | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | b4643f5a |
 | u16_support | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 1886f032 |
 | uhashmap | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 15b0813d |
 | unary_operator_overloading | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 6fc1cd09 |
@@ -537,7 +536,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | unroll_loop_regression | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 08df8f23 |
 | unrolling_regression_8333 | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | 🟡 field-dependent | ❌ | 6968345a |
 | unsafe_range_constraint | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ❌ | 7a362206 |
-| unsigned_to_signed_cast | ✅ | ✅ | ➖ | ✅ | ❌ | ➖ | 🟡 predicted | ✅ | 4dfb8dfb |
+| unsigned_to_signed_cast | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 4f1fc927 |
 | vector_coercion | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 7e0d616a |
 | vector_dynamic_index | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 3423b1e3 |
 | vector_dynamic_insert | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 7aee5356 |
@@ -573,20 +572,20 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 
 | column | ✅ | ❌ | ➖ |
 | --- | --- | --- | --- |
-| bn254 compile | 548 | 5 | 3 |
-| bn254 run | 545 | 3 | 8 |
-| bn254 return | 202 | 0 | 354 |
-| goldilocks compile | 517 | 36 | 3 |
-| goldilocks run | 493 | 24 | 39 |
-| goldilocks return | 175 | 1 | 380 |
-| AST | 490 | 27 | 39 |
+| bn254 compile | 547 | 5 | 3 |
+| bn254 run | 544 | 3 | 8 |
+| bn254 return | 203 | 0 | 352 |
+| goldilocks compile | 493 | 59 | 3 |
+| goldilocks run | 477 | 16 | 62 |
+| goldilocks return | 168 | 0 | 387 |
+| AST | 466 | 27 | 62 |
 
 | Fields | count |
 | --- | --- |
-| ✅ equal | 497 |
+| ✅ equal | 482 |
 | ✅ equal* | 2 |
-| 🟡 predicted | 27 |
-| 🟡 field-dependent | 26 |
+| 🟡 predicted | 43 |
+| 🟡 field-dependent | 24 |
 | 🟡 both-sides | 1 |
 | ⚠️ unexpected | 0 |
 | ❌ divergence | 0 |

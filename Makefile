@@ -6,12 +6,11 @@ FIELD ?= bn254
 
 test:
 	$(CARGO) test --locked
-	$(CARGO) test --locked --no-default-features --features goldilocks
+	$(CARGO) test --locked --no-default-features
 
-# The ABI parser requires a build linked against the swept field.
 sweep:
 	@case "$(FIELD)" in bn254|goldilocks) ;; *) echo "FIELD must be bn254 or goldilocks" >&2; exit 1 ;; esac
-	FIELD=$(FIELD) $(CARGO) test --locked --lib $(if $(filter goldilocks,$(FIELD)),--no-default-features --features goldilocks) status::dump_records -- --exact --ignored --nocapture
+	FIELD=$(FIELD) $(CARGO) test --locked --lib status::dump_records -- --exact --ignored --nocapture
 
 render:
 	$(CARGO) test --locked --lib status::render_status_file -- --exact --ignored --nocapture

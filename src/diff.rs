@@ -167,7 +167,8 @@ impl fmt::Display for ComparableError {
 }
 
 /// The outcome of interpreting one program under one field, ready to serialize and diff. `detail`
-/// on `Errored` is triage text only: never compared, never in `STATUS.md`.
+/// on `Errored` is triage text: never compared or shown in `STATUS.md`, though the status verdict
+/// reads it to recognize an entry-point width refusal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffOutcome {
     Returned(DiffValue),
