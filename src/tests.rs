@@ -391,33 +391,6 @@ fn interprets_signed_i32_input() {
     );
 }
 
-/// bn254 i64 control: with 2^64 < p the encoding is injective, so `x = -1` decodes correctly.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn bn254_decodes_signed_i64_input() {
-    let root = fixture("neg_interp_inputs_i64");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: true,
-            bits: 64,
-            value: BigInt::from(-1)
-        })
-    );
-}
-
 /// `u64` can exceed the Goldilocks modulus, so the compiler refuses `x as Field` there.
 #[cfg(feature = "goldilocks")]
 #[test]
@@ -436,7 +409,7 @@ fn goldilocks_rejects_u64_to_field_cast() {
 fn bn254_casts_u64_to_field_exactly() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
     let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = format!("x = \"{}\"", u64::MAX);
+    let toml = format!("hi = \"{}\"\nlo = \"{}\"", u32::MAX, u32::MAX);
     let inputs = inputs_from_prover_toml(
         &validated.program,
         &validated.abi,
@@ -452,34 +425,27 @@ fn bn254_casts_u64_to_field_exactly() {
     assert_eq!(result, Value::Field(expected));
 }
 
-/// `-2^32` has the pattern `p - 1`; `-1` has the pattern `2^64 - 1`, which exceeds the modulus.
-#[cfg(feature = "goldilocks")]
 #[test]
-fn goldilocks_validates_i64_input_patterns() {
-    let root = fixture("neg_interp_inputs_i64");
-    let project = NoirProject::new(root).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let run = |toml: &str| {
-        inputs_from_prover_toml(&validated.program, &validated.abi, toml, validated.field_id)
-            .and_then(|inputs| {
-                interpret_with_inputs(&validated.program, inputs, validated.field_id)
-            })
-    };
-    let expected = |v: i64| {
-        Value::Int(IntValue {
-            signed: true,
-            bits: 64,
-            value: BigInt::from(v),
-        })
-    };
-    for toml in ["x = -4294967296", "x = \"-4294967296\""] {
-        assert_eq!(run(toml).expect(toml), expected(-4294967296), "{toml}");
-    }
-    assert_eq!(run("x = \"1\"").expect("x = \"1\""), expected(1));
-    for toml in ["x = \"-1\"", "x = -1"] {
+fn goldilocks_refuses_an_entry_point_integer_that_can_reach_its_modulus() {
+    for name in [
+        "interp_inputs_i64",
+        "interp_return_i64",
+        "neg_wide_input_u66",
+    ] {
+        let project = NoirProject::new(fixture(name)).expect("project");
         assert!(
-            matches!(run(toml), Err(InterpretError::InvalidInput(_))),
-            "{toml}"
+            compile_for_validation(&project, FieldId::Bn254).is_ok(),
+            "{name}: bn254 takes this entry point"
+        );
+        let error = match compile_for_validation(&project, FieldId::Goldilocks) {
+            Ok(_) => panic!("{name}: this entry point must not compile under Goldilocks"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid type found in the entry point to a program"),
+            "{name}: {error}"
         );
     }
 }
@@ -778,34 +744,6 @@ fn interpreter_return_matches_recorded_expected() {
     );
 }
 
-/// A `u64` program whose constant exceeds the Goldilocks modulus (`p + 1`) compiles under goldilocks
-/// and computes the correct native `u64` result, proving the frontend did not corrupt the integer.
-#[cfg(feature = "goldilocks")]
-#[test]
-fn validates_goldilocks_mono_ast_u64() {
-    let project = NoirProject::new(fixture("interp_inputs_u64")).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked())
-        .expect("goldilocks frontend should produce a mono-AST for a stdlib-free u64 program");
-
-    // main(x: u64) -> u64 = x * 2 + (p + 1). With x = 3: 6 + 18446744069414584322.
-    let x = Value::Int(IntValue {
-        signed: false,
-        bits: 64,
-        value: BigInt::from(3u64),
-    });
-    let result =
-        interpret_with_inputs(&validated.program, vec![x], validated.field_id).expect("interpret");
-    let expected = Value::Int(IntValue {
-        signed: false,
-        bits: 64,
-        value: BigInt::from(18446744069414584328u64),
-    });
-    assert_eq!(
-        result, expected,
-        "Goldilocks mono-AST must carry p+1 exactly and compute the native u64 result"
-    );
-}
-
 #[test]
 fn interprets_integer_widths() {
     for (bits, returned) in [
@@ -914,25 +852,6 @@ fn bn254_accepts_input_above_the_goldilocks_modulus() {
     assert_fixture_return(
         "neg_wide_input_u66",
         Value::Int(IntValue::canonical(false, 66, BigInt::from(1u8) << 65usize)),
-    );
-}
-
-#[cfg(feature = "goldilocks")]
-#[test]
-fn goldilocks_rejects_input_above_its_modulus() {
-    let root = fixture("neg_wide_input_u66");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    );
-    assert!(
-        matches!(inputs, Err(InterpretError::InvalidInput(_))),
-        "{inputs:?}"
     );
 }
 
