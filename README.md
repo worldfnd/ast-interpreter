@@ -70,9 +70,9 @@ the compiler pin in `Cargo.toml`, and the corpus and its path dependencies must 
 Change the compiler pin and interpreter code in separate PRs unless a compiler API change
 requires both.
 
-`tests::the_stdlib_tests_pass_under_the_linked_field` runs every argument-less `#[test]` of the
-standard library through the interpreter; one it cannot run fails it, except bn254's own crypto
-when `bn254-crypto` is off.
+`tests::the_stdlib_tests_pass_under_bn254` and `tests::the_stdlib_tests_pass_under_goldilocks` run
+every argument-less `#[test]` of the standard library through the interpreter under their field;
+one it cannot run fails them, except bn254's own crypto when `bn254-crypto` is off.
 `tests::oracle_survey_execution_success` separately compares the interpreter with Noir's executor;
 its doc comment has the command. Unsupported intrinsics, such as a reference count taken in
 unconstrained code, remain explicit coverage gaps.

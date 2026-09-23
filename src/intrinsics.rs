@@ -518,9 +518,9 @@ mod tests {
     use acvm::{FieldId, FieldValue};
     use std::rc::Rc;
 
-    fn field(n: u128) -> Value {
+    fn field(n: u128, id: FieldId) -> Value {
         Value::Field(
-            FieldValue::try_from_biguint(n.into(), FieldId::linked())
+            FieldValue::try_from_biguint(n.into(), id)
                 .expect("the test values are below every modulus"),
         )
     }
@@ -601,93 +601,103 @@ mod tests {
 
     #[test]
     fn to_le_radix_decomposes_little_endian_bytes() {
-        // 258 = 0x0102 -> [2, 1, 0, 0]
-        let out = to_radix(
-            &[field(258), u32v(256)],
-            false,
-            false,
-            &array_type(4),
-            Location::dummy(),
-        )
-        .unwrap();
-        assert_eq!(out, u8_array(&[2, 1, 0, 0]));
+        for id in [FieldId::Bn254, FieldId::Goldilocks] {
+            let out = to_radix(
+                &[field(258, id), u32v(256)],
+                false,
+                false,
+                &array_type(4),
+                Location::dummy(),
+            )
+            .unwrap();
+            assert_eq!(out, u8_array(&[2, 1, 0, 0]), "{id}");
+        }
     }
 
     #[test]
     fn to_be_radix_reverses_the_digits() {
-        let out = to_radix(
-            &[field(258), u32v(256)],
-            true,
-            false,
-            &array_type(4),
-            Location::dummy(),
-        )
-        .unwrap();
-        assert_eq!(out, u8_array(&[0, 0, 1, 2]));
+        for id in [FieldId::Bn254, FieldId::Goldilocks] {
+            let out = to_radix(
+                &[field(258, id), u32v(256)],
+                true,
+                false,
+                &array_type(4),
+                Location::dummy(),
+            )
+            .unwrap();
+            assert_eq!(out, u8_array(&[0, 0, 1, 2]), "{id}");
+        }
     }
 
     #[test]
     fn to_le_bits_sets_the_right_bits() {
-        // 258 = 0b1_0000_0010 -> bit 1 and bit 8 set.
-        let out = to_radix(
-            &[field(258)],
-            false,
-            true,
-            &array_type(10),
-            Location::dummy(),
-        )
-        .unwrap();
         let mut expected = vec![false; 10];
         expected[1] = true;
         expected[8] = true;
-        assert_eq!(
-            out,
-            Value::Array(expected.into_iter().map(Value::Bool).collect())
-        );
+        let expected = Value::Array(expected.into_iter().map(Value::Bool).collect());
+        for id in [FieldId::Bn254, FieldId::Goldilocks] {
+            let out = to_radix(
+                &[field(258, id)],
+                false,
+                true,
+                &array_type(10),
+                Location::dummy(),
+            )
+            .unwrap();
+            assert_eq!(out, expected, "{id}");
+        }
     }
 
     #[test]
     fn zero_decomposes_to_all_zero_limbs() {
-        let out = to_radix(
-            &[field(0), u32v(256)],
-            false,
-            false,
-            &array_type(3),
-            Location::dummy(),
-        )
-        .unwrap();
-        assert_eq!(out, u8_array(&[0, 0, 0]));
+        for id in [FieldId::Bn254, FieldId::Goldilocks] {
+            let out = to_radix(
+                &[field(0, id), u32v(256)],
+                false,
+                false,
+                &array_type(3),
+                Location::dummy(),
+            )
+            .unwrap();
+            assert_eq!(out, u8_array(&[0, 0, 0]), "{id}");
+        }
     }
 
     #[test]
     fn unconstrained_radix_three_is_supported() {
-        let out = to_radix(
-            &[field(11), u32v(3)],
-            false,
-            false,
-            &array_type(4),
-            Location::dummy(),
-        )
-        .unwrap();
-        assert_eq!(out, u8_array(&[2, 0, 1, 0]));
+        for id in [FieldId::Bn254, FieldId::Goldilocks] {
+            let out = to_radix(
+                &[field(11, id), u32v(3)],
+                false,
+                false,
+                &array_type(4),
+                Location::dummy(),
+            )
+            .unwrap();
+            assert_eq!(out, u8_array(&[2, 0, 1, 0]), "{id}");
+        }
     }
 
     #[test]
     fn decomposition_errors_when_limbs_too_few() {
-        // 258 needs two bytes; one limb cannot hold it.
-        assert!(matches!(
-            to_radix(
-                &[field(258), u32v(256)],
-                false,
-                false,
-                &array_type(1),
-                Location::dummy(),
-            ),
-            Err(InterpretError::AssertionFailed {
-                message: Some(message),
-                ..
-            }) if message == "Field failed to decompose into specified 1 limbs"
-        ));
+        for id in [FieldId::Bn254, FieldId::Goldilocks] {
+            assert!(
+                matches!(
+                    to_radix(
+                        &[field(258, id), u32v(256)],
+                        false,
+                        false,
+                        &array_type(1),
+                        Location::dummy(),
+                    ),
+                    Err(InterpretError::AssertionFailed {
+                        message: Some(message),
+                        ..
+                    }) if message == "Field failed to decompose into specified 1 limbs"
+                ),
+                "{id}"
+            );
+        }
     }
 
     #[test]
@@ -735,29 +745,31 @@ mod tests {
     #[test]
     fn range_constraint_accepts_fitting_and_rejects_oversize() {
         let loc = Location::dummy();
-        assert_eq!(
-            apply_range_constraint(&[field(255), u32v(8)], loc).unwrap(),
-            Value::Unit
-        );
-        assert!(matches!(
-            apply_range_constraint(&[field(256), u32v(8)], loc),
-            Err(InterpretError::AssertionFailed { .. })
-        ));
-        assert_eq!(
-            apply_range_constraint(&[field(65535), u32v(16)], loc).unwrap(),
-            Value::Unit
-        );
-        assert!(matches!(
-            apply_range_constraint(&[field(65536), u32v(16)], loc),
-            Err(InterpretError::AssertionFailed { .. })
-        ));
-        assert_eq!(
-            apply_range_constraint(&[field(0), u32v(0)], loc).unwrap(),
-            Value::Unit
-        );
-        assert!(matches!(
-            apply_range_constraint(&[field(1), u32v(0)], loc),
-            Err(InterpretError::AssertionFailed { .. })
-        ));
+        for id in [FieldId::Bn254, FieldId::Goldilocks] {
+            assert_eq!(
+                apply_range_constraint(&[field(255, id), u32v(8)], loc).unwrap(),
+                Value::Unit
+            );
+            assert!(matches!(
+                apply_range_constraint(&[field(256, id), u32v(8)], loc),
+                Err(InterpretError::AssertionFailed { .. })
+            ));
+            assert_eq!(
+                apply_range_constraint(&[field(65535, id), u32v(16)], loc).unwrap(),
+                Value::Unit
+            );
+            assert!(matches!(
+                apply_range_constraint(&[field(65536, id), u32v(16)], loc),
+                Err(InterpretError::AssertionFailed { .. })
+            ));
+            assert_eq!(
+                apply_range_constraint(&[field(0, id), u32v(0)], loc).unwrap(),
+                Value::Unit
+            );
+            assert!(matches!(
+                apply_range_constraint(&[field(1, id), u32v(0)], loc),
+                Err(InterpretError::AssertionFailed { .. })
+            ));
+        }
     }
 }
