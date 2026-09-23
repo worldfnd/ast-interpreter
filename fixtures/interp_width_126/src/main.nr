@@ -37,7 +37,7 @@ where
     -x
 }
 
-fn main(a: u126, b: u126) -> pub u126 {
+fn check(a: u126, b: u126) -> u126 {
     let top: u126 = 1 << 125;
     let max: u126 = 85070591730234615865843651857942052863;
     assert(top == 42535295865117307932921825928971026432);
@@ -128,4 +128,8 @@ fn main(a: u126, b: u126) -> pub u126 {
     assert(order(neg, sa));
     assert(negate(sa) == neg);
     a * b + (top >> 125)
+}
+
+fn main(a: u8, b: u8) -> pub u8 {
+    check(a as u126, b as u126) as u8
 }

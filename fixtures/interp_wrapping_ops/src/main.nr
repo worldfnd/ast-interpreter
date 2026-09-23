@@ -1,6 +1,7 @@
 use std::ops::{WrappingAdd, WrappingMul, WrappingSub};
 
-fn main(x: u64) -> pub u64 {
+fn main(x: u32) -> pub u32 {
+    let x: u64 = x as u64;
     let zero64: u64 = 0;
     let max64: u64 = 18446744073709551615;
     let zero128: u128 = 0;
@@ -38,5 +39,5 @@ fn main(x: u64) -> pub u64 {
     assert(minus_one.wrapping_mul(minus_one) == 1);
     assert(minus_one.wrapping_add(x as i64) == 0);
     assert(imax64.wrapping_mul(2) == -2);
-    max64.wrapping_add(x).wrapping_add(7)
+    max64.wrapping_add(x).wrapping_add(7) as u32
 }

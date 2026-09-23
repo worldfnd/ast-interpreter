@@ -7,8 +7,8 @@ fn twice(r: &mut u64) {
     bump(r, 5);
 }
 
-fn main(start: u64) -> pub u64 {
-    let mut acc = start;
+fn main(start: u32) -> pub u32 {
+    let mut acc = start as u64;
     twice(&mut acc);
-    acc
+    acc as u32
 }
