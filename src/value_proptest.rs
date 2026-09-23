@@ -35,17 +35,24 @@ fn int_type() -> impl Strategy<Value = (bool, u32)> {
     (any::<bool>(), width())
 }
 
-/// An in-range [`IntValue`] of the given type: draw a magnitude and a sign, then let
-/// [`IntValue::canonical`] wrap the raw value into the type's range (two's complement).
-fn int_value_of(signed: bool, bits: u32) -> impl Strategy<Value = IntValue> {
-    (any::<u128>(), any::<bool>()).prop_map(move |(mag, neg)| {
-        let raw = if neg {
-            -BigInt::from(mag)
-        } else {
-            BigInt::from(mag)
-        };
-        IntValue::canonical(signed, bits, raw)
+/// A signed raw value whose magnitude can set any bit of a `bits`-bit type, and a bit beyond it.
+fn raw_value(bits: u32) -> impl Strategy<Value = BigInt> {
+    let bytes = (bits as usize).div_ceil(8) + 1;
+    (prop::collection::vec(any::<u8>(), 0..=bytes), any::<bool>()).prop_map(|(le_bytes, neg)| {
+        let magnitude = BigInt::from_bytes_le(num_bigint::Sign::Plus, &le_bytes);
+        if neg { -magnitude } else { magnitude }
     })
+}
+
+/// An integer type and a raw value for it.
+fn int_type_and_raw() -> impl Strategy<Value = (bool, u32, BigInt)> {
+    int_type().prop_flat_map(|(signed, bits)| (Just(signed), Just(bits), raw_value(bits)))
+}
+
+/// An in-range [`IntValue`] of the given type: draw a raw value, then let
+/// [`IntValue::canonical`] wrap it into the type's range (two's complement).
+fn int_value_of(signed: bool, bits: u32) -> impl Strategy<Value = IntValue> {
+    raw_value(bits).prop_map(move |raw| IntValue::canonical(signed, bits, raw))
 }
 
 /// A pair of values sharing ONE integer type — the shape `eval_int_binary` requires (both operands,
@@ -95,11 +102,7 @@ proptest! {
 
     /// Signedness flips and widen/narrow casts preserve the expected value.
     #[test]
-    fn p2_cast_roundtrips(
-        (signed, bits) in int_type(),
-        (mag, neg) in (any::<u128>(), any::<bool>()),
-    ) {
-        let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
+    fn p2_cast_roundtrips((signed, bits, raw) in int_type_and_raw()) {
         let v = IntValue::canonical(signed, bits, raw);
 
         // (a) flip signedness at the same width, then flip back.
@@ -121,11 +124,9 @@ proptest! {
     /// shifted type, so at the narrowest widths it can exceed `bits` by only a little.
     #[test]
     fn p3a_over_shift_errors(
-        bits in width(),
-        (mag, neg) in (any::<u128>(), any::<bool>()),
+        (_, bits, raw) in int_type_and_raw(),
         extra in 0u32..=64,
     ) {
-        let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(false, bits, raw);
         let max_extra = if bits < 8 { (1u32 << bits) - 1 - bits } else { 64 };
         let amount = IntValue::canonical(false, bits, BigInt::from(bits + extra % (max_extra + 1)));
@@ -140,11 +141,9 @@ proptest! {
     /// In-range shifts match independent arithmetic references.
     #[test]
     fn p3b_in_range_shifts(
-        (signed, bits) in int_type(),
-        (mag, neg) in (any::<u128>(), any::<bool>()),
+        (signed, bits, raw) in int_type_and_raw(),
         amt_seed in any::<u32>(),
     ) {
-        let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(signed, bits, raw);
         let amount = (amt_seed % bits) as usize;
         let b = IntValue::canonical(signed, bits, BigInt::from(amount));
@@ -176,11 +175,7 @@ proptest! {
 
     /// Field encoding preserves the bit pattern or rejects the source width.
     #[test]
-    fn p4_field_encoding_checks_source_width(
-        (signed, bits) in int_type(),
-        (mag, neg) in (any::<u128>(), any::<bool>()),
-    ) {
-        let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
+    fn p4_field_encoding_checks_source_width((signed, bits, raw) in int_type_and_raw()) {
         let iv = IntValue::canonical(signed, bits, raw);
 
         let config = FieldConfig::linked();
