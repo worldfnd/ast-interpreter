@@ -219,12 +219,7 @@ fn the_input_bridge_follows_the_abi_boundary_vectors() {
 
 #[test]
 fn rejects_inputs_from_another_field() {
-    let field = FieldId::linked();
-    let other = if field == FieldId::Bn254 {
-        FieldId::Goldilocks
-    } else {
-        FieldId::Bn254
-    };
+    let (field, other) = (FieldId::Bn254, FieldId::Goldilocks);
     let good = Value::Field(FieldValue::one(field));
     let bad = Value::Field(FieldValue::one(other));
     let cell = |value: &Value| Rc::new(RefCell::new(value.clone()));
@@ -340,7 +335,7 @@ fn rejects_reachable_type_error() {
 fn interprets_fixture_inputs_from_prover_toml() {
     let root = fixture("interp_inputs_u64");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::Bn254).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
     let inputs = inputs_from_prover_toml(
         &validated.program,
@@ -392,11 +387,10 @@ fn interprets_signed_i32_input() {
 }
 
 /// `u64` can exceed the Goldilocks modulus, so the compiler refuses `x as Field` there.
-#[cfg(feature = "goldilocks")]
 #[test]
 fn goldilocks_rejects_u64_to_field_cast() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
-    let err = match compile_for_validation(&project, FieldId::linked()) {
+    let err = match compile_for_validation(&project, FieldId::Goldilocks) {
         Ok(_) => panic!("u64 as Field must not compile under Goldilocks"),
         Err(e) => e,
     };
@@ -404,11 +398,10 @@ fn goldilocks_rejects_u64_to_field_cast() {
 }
 
 /// Under bn254 every `u64` is below the modulus and the cast is the identity on the value.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn bn254_casts_u64_to_field_exactly() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::Bn254).expect("frontend");
     let toml = format!("hi = \"{}\"\nlo = \"{}\"", u32::MAX, u32::MAX);
     let inputs = inputs_from_prover_toml(
         &validated.program,
@@ -673,7 +666,6 @@ fn stored_format_strings_render_with_their_type_names() {
 }
 
 /// A `main` with inputs interprets correctly from `Prover.toml`. `assert_statement` has `x == y == 3`.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn interprets_program_with_inputs() {
     let program_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -704,7 +696,6 @@ fn interprets_program_with_inputs() {
 /// Differential correctness: the interpreter's computed return value matches the expected output
 /// Noir's corpus records in `Prover.toml`. `arithmetic_binary_operations` returns 10 (a u64),
 /// so this verifies the actual value, not merely that interpretation didn't error.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn interpreter_return_matches_recorded_expected() {
     let program_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -846,7 +837,6 @@ fn interprets_stdlib_fixtures() {
     }
 }
 
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn bn254_accepts_input_above_the_goldilocks_modulus() {
     assert_fixture_return(
@@ -1104,7 +1094,6 @@ fn oracle_compare(program_dir: &Path) -> String {
 }
 
 /// Compare the fixtures supported by the BN254 executor with the interpreter.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn oracle_matches_interpreter_smoke() {
     // interp_inputs_mixed is left out: its shape trips Noir's ACIR flattening pass, so the executor
@@ -1202,7 +1191,7 @@ fn oracle_survey_execution_success() {
 }
 
 // Parked behind an always-false cfg until the mavros-compiler dependency is available; restore
-// `#[cfg(all(feature = "mavros-oracle", not(feature = "goldilocks")))]` then.
+// `#[cfg(feature = "mavros-oracle")]` then.
 #[cfg(any())]
 mod mavros_oracle {
     use super::{

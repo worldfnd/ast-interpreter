@@ -1,5 +1,5 @@
 //! bn254's curve, Pedersen-generator and Poseidon2 black boxes through `bn254_blackbox_solver`.
-//! Only a bn254 build holds their field elements, so the module exists only under `bn254-crypto`.
+//! They run only for bn254 programs and hold bn254 elements whatever field the build links.
 
 use acvm::{AcirField, Bn254FieldElement, FieldValue};
 use noirc_frontend::monomorphization::ast::Type;

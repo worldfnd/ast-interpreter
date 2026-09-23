@@ -31,8 +31,8 @@ Crates that pass Noir AST values into this interpreter must use the same pinned 
 error until the two halves meet. `acvm::FieldElement` is selected at compile time.
 
 The `bn254-crypto` feature, on by default, routes the embedded-curve, Pedersen-generator and
-Poseidon2 built-ins to `bn254_blackbox_solver`; a `goldilocks` build must disable it with
-`--no-default-features`, since only a bn254 build holds those field elements.
+Poseidon2 built-ins to `bn254_blackbox_solver`; they take bn254 values only, which is the one field
+where Noir's standard library reaches them.
 
 The `mavros-oracle` feature is a placeholder. Its `mavros-compiler` dependency is commented out, so
 enabling the feature fails the build with a `compile_error!` saying so.
@@ -48,7 +48,7 @@ Rust 1.89.0 is pinned in `rust-toolchain.toml`. Run these commands from this dir
 
 ```sh
 cargo build
-make test            # Tests under bn254 and Goldilocks (the latter with --no-default-features)
+make test            # Both feature builds test bn254 and Goldilocks programs
 ```
 
 ## STATUS.md
