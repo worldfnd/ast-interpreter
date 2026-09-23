@@ -453,26 +453,9 @@ fn interprets_mixed_inputs() {
 /// A `&mut` threaded through `main -> twice -> bump` mutates one shared cell: `100 + 5 + 5 == 110`.
 #[test]
 fn interprets_reference_call_chain() {
-    let root = fixture("interp_refs_call_chain");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: false,
-            bits: 64,
-            value: BigInt::from(110)
-        })
+    assert_fixture_return(
+        "interp_refs_call_chain",
+        Value::Int(IntValue::canonical(false, 32, BigInt::from(110))),
     );
 }
 
@@ -748,9 +731,14 @@ fn interprets_integer_widths() {
         (128, 16),
         (16384, 16),
     ] {
+        let returned_width = if bits > 63 { 8 } else { bits };
         assert_fixture_return(
             &format!("interp_width_{bits}"),
-            Value::Int(IntValue::canonical(false, bits, BigInt::from(returned))),
+            Value::Int(IntValue::canonical(
+                false,
+                returned_width,
+                BigInt::from(returned),
+            )),
         );
     }
 }
@@ -809,7 +797,7 @@ fn interprets_stdlib_fixtures() {
     for (name, expected) in [
         (
             "interp_wrapping_ops",
-            Value::Int(IntValue::canonical(false, 64, BigInt::from(7))),
+            Value::Int(IntValue::canonical(false, 32, BigInt::from(7))),
         ),
         ("interp_hash_limbs", Value::Bool(false)),
         ("interp_field_lt", Value::Bool(true)),

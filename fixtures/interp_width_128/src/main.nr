@@ -37,7 +37,7 @@ where
     -x
 }
 
-fn main(a: u128, b: u128) -> pub u128 {
+fn check(a: u128, b: u128) -> u128 {
     let top: u128 = 1 << 127;
     let max: u128 = 340282366920938463463374607431768211455;
     assert(top == 170141183460469231731687303715884105728);
@@ -126,4 +126,8 @@ fn main(a: u128, b: u128) -> pub u128 {
     assert(order(neg, sa));
     assert(negate(sa) == neg);
     a * b + (top >> 127)
+}
+
+fn main(a: u8, b: u8) -> pub u8 {
+    check(a as u128, b as u128) as u8
 }

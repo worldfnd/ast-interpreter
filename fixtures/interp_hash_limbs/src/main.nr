@@ -24,7 +24,8 @@ where
     hasher.finish()
 }
 
-fn main(x: u64) -> pub bool {
+fn main(x: u32) -> pub bool {
+    let x: u64 = x as u64;
     // The Goldilocks modulus, a legal u64.
     let p: u64 = 18446744069414584321;
     let y: u64 = x + p;
