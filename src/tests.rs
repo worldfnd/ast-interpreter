@@ -102,28 +102,116 @@ fn one_build_interprets_a_program_under_two_fields() {
 }
 
 #[test]
-fn toml_bridge_requires_the_linked_field() {
+fn a_scalar_whose_abi_type_disagrees_with_its_program_type_is_refused() {
+    use noirc_abi::input_parser::InputValue;
+    use noirc_abi::{AbiType, Sign};
+    use noirc_frontend::monomorphization::ast::Type;
+    use noirc_frontend::shared::Signedness;
+
+    let u64_abi = AbiType::Integer {
+        sign: Sign::Unsigned,
+        width: 64,
+    };
+    let u8_abi = AbiType::Integer {
+        sign: Sign::Unsigned,
+        width: 8,
+    };
+    let input = InputValue::Field(5u8.into());
+    for (abi_type, typ) in [
+        (AbiType::Field, Type::Bool),
+        (u64_abi.clone(), Type::Bool),
+        (u64_abi, Type::Integer(Signedness::Unsigned, 8)),
+        (u8_abi, Type::Integer(Signedness::Signed, 8)),
+        (AbiType::Boolean, Type::Field),
+    ] {
+        let result = crate::input::value_from_input(&input, &abi_type, &typ, FieldId::Bn254);
+        assert!(
+            matches!(result, Err(InterpretError::Internal(_))),
+            "{abi_type:?} as {typ:?}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn toml_bridge_reads_inputs_in_the_programs_field() {
     for field in [FieldId::Bn254, FieldId::Goldilocks] {
         let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
         for (toml, expected) in [
             ("x = -1\nreturn = -1", -FieldValue::one(field)),
             ("x = 1\nreturn = 1", FieldValue::one(field)),
         ] {
-            let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, toml, field);
+            let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, toml, field)
+                .unwrap_or_else(|error| panic!("{field}: {toml}: {error}"));
             let recorded =
-                expected_return_from_prover_toml(&validated.program, &validated.abi, toml, field);
-            if field == FieldId::linked() {
-                assert_eq!(inputs.unwrap(), vec![Value::Field(expected.clone())]);
-                assert_eq!(recorded.unwrap(), Some(Value::Field(expected)));
-            } else {
-                assert!(
-                    matches!(inputs, Err(InterpretError::InvalidInput(_))),
-                    "{field}: {inputs:?}"
-                );
-                assert!(
-                    matches!(recorded, Err(InterpretError::InvalidInput(_))),
-                    "{field}: {recorded:?}"
-                );
+                expected_return_from_prover_toml(&validated.program, &validated.abi, toml, field)
+                    .unwrap_or_else(|error| panic!("{field}: {toml}: {error}"));
+            assert_eq!(
+                inputs,
+                vec![Value::Field(expected.clone())],
+                "{field}: {toml}"
+            );
+            assert_eq!(recorded, Some(Value::Field(expected)), "{field}: {toml}");
+        }
+    }
+}
+
+#[test]
+fn the_input_bridge_follows_the_abi_boundary_vectors() {
+    use noirc_abi::conformance::boundary_vectors;
+    use noirc_abi::input_parser::Format;
+    use noirc_abi::{AbiParameter, AbiType, AbiVisibility, Sign};
+    use noirc_frontend::monomorphization::ast::Type;
+    use noirc_frontend::shared::Signedness;
+
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let config = FieldConfig::new(field);
+        for vector in boundary_vectors(config) {
+            let abi = noirc_abi::Abi {
+                parameters: vec![AbiParameter {
+                    name: "x".to_string(),
+                    typ: vector.typ.clone(),
+                    visibility: AbiVisibility::Private,
+                }],
+                return_type: None,
+                error_types: Default::default(),
+            };
+            let typ = match &vector.typ {
+                AbiType::Field => Type::Field,
+                AbiType::Boolean => Type::Bool,
+                AbiType::Integer { sign, width } => {
+                    let signedness = match sign {
+                        Sign::Unsigned => Signedness::Unsigned,
+                        Sign::Signed => Signedness::Signed,
+                    };
+                    Type::Integer(signedness, *width)
+                }
+                other => panic!("boundary vectors are scalars, got {other:?}"),
+            };
+            let parsed = Format::Toml.parse(&format!("x = {}", vector.spelling), &abi, config);
+            match (parsed, &vector.element) {
+                (Ok(inputs), Some(element)) => {
+                    let value =
+                        crate::input::value_from_input(&inputs["x"], &vector.typ, &typ, field)
+                            .unwrap_or_else(|error| panic!("{field}: {vector:?}: {error}"));
+                    let expected = match &typ {
+                        Type::Field => Value::Field(
+                            FieldValue::try_from_biguint(element.clone(), field)
+                                .expect("an accepted element is below the modulus"),
+                        ),
+                        Type::Bool => Value::Bool(*element == 1u8.into()),
+                        Type::Integer(signedness, bits) => Value::Int(IntValue::canonical(
+                            signedness.is_signed(),
+                            *bits,
+                            BigInt::from(element.clone()),
+                        )),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(value, expected, "{field}: {vector:?}");
+                }
+                (Err(_), None) => {}
+                (parsed, element) => {
+                    panic!("{field}: {vector:?}: parsed {parsed:?}, expected {element:?}")
+                }
             }
         }
     }
@@ -1054,7 +1142,12 @@ fn oracle_compare(program_dir: &Path) -> String {
                         Err(e) => return format!("oracle-errored: {e}"),
                     };
                     match validated.abi.return_type.as_ref() {
-                        Some(r) => match crate::input::value_from_input(&iv, &r.abi_type, ret_ty) {
+                        Some(r) => match crate::input::value_from_input(
+                            &iv,
+                            &r.abi_type,
+                            ret_ty,
+                            FieldId::linked(),
+                        ) {
                             Ok(v) => v,
                             Err(e) => return format!("oracle-errored: decode: {e}"),
                         },
