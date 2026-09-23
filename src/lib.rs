@@ -5,11 +5,6 @@
 //! under. One build therefore interprets a program under any supported field, and tests compare
 //! the field-independent results (integers, bools, arrays, tuples, structs) across two of them.
 
-#[cfg(feature = "mavros-oracle")]
-compile_error!(
-    "the `mavros-oracle` feature needs the mavros-compiler dependency, blocked on the Mavros Goldilocks branch"
-);
-
 #[cfg(feature = "bn254-crypto")]
 mod bn254_crypto;
 mod diff;
@@ -26,6 +21,8 @@ mod capability;
 mod corpus;
 #[cfg(test)]
 mod loader;
+#[cfg(all(test, feature = "mavros-oracle"))]
+mod mavros_oracle;
 #[cfg(test)]
 mod noir_oracle;
 #[cfg(test)]

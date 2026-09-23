@@ -135,8 +135,8 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         &[Capability::UnsignedFits(64)],
     ),
     (
-        "fixtures/neg_wide_input_u66",
-        &[Capability::UnsignedFits(66)],
+        "fixtures/neg_wide_input_u128",
+        &[Capability::UnsignedFits(128)],
     ),
 ];
 
