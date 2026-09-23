@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::corpus::{
-    compile_error_of, copy_dir, corpus_dir, list_programs, panic_message, temp_noir_package,
+    compile_error_of, copy_dir, corpus_dir, list_programs, noir_checkout, panic_message,
+    temp_noir_package,
 };
 use super::diff::{FailureKind, comparable_error_of};
 use super::expected_return_from_prover_toml;
@@ -836,6 +837,31 @@ fn generic_builtins_select_the_limb_hash_on_bn254() {
     assert_eq!(hash_under(FieldId::Bn254, true).0, limbs);
     assert_eq!(hash_under(FieldId::Goldilocks, false).0, limbs);
     assert_eq!(hash_under(FieldId::Goldilocks, true).0, limbs);
+}
+
+/// Unbounded recursion fails the program the way Noir's executor does, with `Stack too deep`,
+/// instead of exhausting the interpreter's own stack: direct, mutual, through a lambda, and
+/// through unconstrained entry points that share a callee.
+#[test]
+fn unbounded_recursion_is_a_stack_too_deep_assertion() {
+    for name in [
+        "simple_infinite_recursive_function",
+        "simple_infinite_recursive_lambda",
+        "mutually_recursive_simple_functions",
+        "brillig_entry_points_shared_recursive",
+    ] {
+        let root = noir_checkout()
+            .join("test_programs/execution_failure")
+            .join(name);
+        let project = NoirProject::new(root).expect("project");
+        let validated = compile_for_validation(&project, FieldId::Bn254)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let error = interpret(&validated.program, validated.field_id).expect_err(name);
+        assert!(
+            matches!(&error, InterpretError::AssertionFailed { message: Some(m), .. } if m == "Stack too deep"),
+            "{name}: {error}"
+        );
+    }
 }
 
 /// An entry point carries only the integer types the circuit backend lowers, under every field:

@@ -49,6 +49,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use acvm::{FieldConfig, FieldId};
+use noirc_errors::Location;
 use noirc_frontend::monomorphization::ast::{FuncId, Function, GlobalId, LocalId, Program};
 
 /// Per-call-frame local environment: each `LocalId` is unique within a monomorphized function.
@@ -74,7 +75,16 @@ pub(crate) struct Interpreter<'p> {
     /// Whether the current function is unconstrained; drives `is_unconstrained()`. The monomorphizer
     /// emits a separate variant per function, so this is just the current function's own flag.
     unconstrained: bool,
+    /// How many calls are in progress, bounded by [`MAX_CALL_DEPTH`].
+    call_depth: usize,
 }
+
+/// The deepest nesting of calls the interpreter runs. Noir's Brillig VM ends a runaway recursion
+/// with the assertion `Stack too deep` once its stack memory is spent (`check_max_stack_depth`
+/// in `noirc_evaluator`); the interpreter raises the same assertion at this depth, so an
+/// unbounded recursion fails the program rather than the process. No corpus program nests
+/// calls 50 deep, and the bound keeps the heaviest frames inside the test threads' stack.
+const MAX_CALL_DEPTH: usize = 256;
 
 /// Interpret `program`'s entry point with no inputs (for self-checking programs whose `main`
 /// takes no parameters).
@@ -105,7 +115,8 @@ pub fn interpret_with_inputs(
         )));
     }
     input::validate_inputs(&inputs, field)?;
-    interp.call_function(main.id, inputs)
+    // The entry call has no call site of its own.
+    interp.call_function(main.id, inputs, Location::dummy())
 }
 
 pub(crate) fn function_of(program: &Program, id: FuncId) -> Result<&Function, InterpretError> {
@@ -128,6 +139,7 @@ impl<'p> Interpreter<'p> {
             field: FieldConfig::new(field),
             globals: HashMap::new(),
             unconstrained: false,
+            call_depth: 0,
         }
     }
 
@@ -135,7 +147,20 @@ impl<'p> Interpreter<'p> {
         function_of(self.program, id)
     }
 
-    fn call_function(&mut self, id: FuncId, args: Vec<Value>) -> Result<Value, InterpretError> {
+    /// Call `id` with `args`; `location` is the call's, for the diagnostics of a call that
+    /// cannot go ahead.
+    fn call_function(
+        &mut self,
+        id: FuncId,
+        args: Vec<Value>,
+        location: Location,
+    ) -> Result<Value, InterpretError> {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(InterpretError::AssertionFailed {
+                location,
+                message: Some("Stack too deep".to_string()),
+            });
+        }
         let func = self.function(id)?;
         if func.parameters.len() != args.len() {
             return Err(InterpretError::Internal(format!(
@@ -158,7 +183,9 @@ impl<'p> Interpreter<'p> {
         // Enter the callee's constrained-ness for the duration of its body.
         let outer_unconstrained = self.unconstrained;
         self.unconstrained = func.unconstrained;
+        self.call_depth += 1;
         let flow = self.eval(&func.body, &mut frame);
+        self.call_depth -= 1;
         self.unconstrained = outer_unconstrained;
         match flow? {
             Flow::Normal(value) => Ok(value),

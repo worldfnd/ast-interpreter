@@ -219,7 +219,7 @@ impl<'p> Interpreter<'p> {
                     args.push(self.eval_expr_value(argument, env)?);
                 }
                 match callee {
-                    Callee::Function(id) => self.call_function(id, args)?,
+                    Callee::Function(id) => self.call_function(id, args, call.location)?,
                     Callee::Intrinsic(name) => {
                         self.call_intrinsic(name, args, &call.return_type, call.location)?
                     }
