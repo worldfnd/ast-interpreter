@@ -70,19 +70,18 @@ license = "Apache-2.0"
 repository = "https://github.com/worldfnd/ast-interpreter"
 
 [workspace.dependencies]
-# The Noir crates, pinned to a single git revision so the interpreter and the compiler cannot drift
-# onto mismatched sources (the compiled-in field is a global).
-acvm = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "acvm" }
-bn254_blackbox_solver = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "bn254_blackbox_solver", default-features = false }
-fm = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "fm" }
-nargo = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "nargo" }
-nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "nargo_toml" }
-noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "noirc_abi" }
-noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "noirc_artifacts" }
-noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "noirc_frontend" }
-noirc_printable_type = { git = "https://github.com/worldfnd/noir.git", rev = "02c874710719c1d43f2cf16e7181427714ac73b8", package = "noirc_printable_type" }
+# Pin all Noir crates together so they share AST types and the linked `FieldElement`.
+acvm = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "acvm" }
+bn254_blackbox_solver = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "bn254_blackbox_solver", default-features = false }
+fm = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "fm" }
+nargo = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "nargo" }
+nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_abi" }
+noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_artifacts" }
+noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_frontend" }
+noirc_printable_type = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_printable_type" }
 
 # Shared crates.
 serde = { version = "1.0.204", features = ["derive"] }
