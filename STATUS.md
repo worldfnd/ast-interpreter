@@ -4,9 +4,9 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 
 | provenance | value |
 | --- | --- |
-| noir_rev | 225db3e18f0ffaeeb3919a668f78b9e9c867b41f |
+| noir_rev | 6a1e938795ed3bf14866617b4a18d465fb6db9d9 |
 | corpus_hash | 3ad62c2ccd6466555cdc14ba75992a0fdbb31beb14fec9fc46f62680576ebc7a |
-| programs | 509 corpus, 46 fixtures |
+| programs | 509 corpus, 48 fixtures |
 | toolchain | rustc 1.89.0 (29483883e 2025-08-04) |
 | format | dump 5, projection 3 |
 
@@ -164,6 +164,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/interp_closures | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 42450ade |
 | fixtures/interp_derive_eq_hash | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 28c69462 |
 | fixtures/interp_field_lt | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | bfa709b3 |
+| fixtures/interp_generic_twins | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal* | ❌ | e44cf788 |
 | fixtures/interp_hash_limbs | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | e91c024f |
 | fixtures/interp_inputs_i32 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | af422c29 |
 | fixtures/interp_inputs_i64 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | c1dd9e68 |
@@ -181,14 +182,14 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/interp_refs_struct_field | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | b23c1fda |
 | fixtures/interp_return_i64 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | d98a2d5c |
 | fixtures/interp_str_bytes | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6a1a68e4 |
-| fixtures/interp_width_10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6df592ef |
+| fixtures/interp_width_10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | b187712f |
 | fixtures/interp_width_126 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 41d0e102 |
 | fixtures/interp_width_128 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | a7668db8 |
 | fixtures/interp_width_16384 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 864c8180 |
-| fixtures/interp_width_2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 70207f1e |
-| fixtures/interp_width_33 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 88839512 |
-| fixtures/interp_width_34 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 7c1499ec |
-| fixtures/interp_width_36 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 88df8be2 |
+| fixtures/interp_width_2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 1dee9fcc |
+| fixtures/interp_width_33 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 433f05a5 |
+| fixtures/interp_width_34 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 026be225 |
+| fixtures/interp_width_36 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | ab88cf27 |
 | fixtures/interp_width_66 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | c7f7c45d |
 | fixtures/interp_wrapping_ops | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 5d2c9c63 |
 | fixtures/intrinsic_conversions | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | a6992c0a |
@@ -197,9 +198,10 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/intrinsic_to_bytes | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ❌ | 16f8d089 |
 | fixtures/neg_assert_fail | ✅ | ❌ | ➖ | ✅ | ❌ | ➖ | ✅ equal | ✅ | fa98970b |
 | fixtures/neg_assert_fmt_msg | ✅ | ❌ | ➖ | ✅ | ❌ | ➖ | ✅ equal | ✅ | d8f9ae3f |
+| fixtures/neg_entry_width_u24 | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | edeb52cd |
 | fixtures/neg_interp_cast_u64_to_field | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | e9d03c0b |
 | fixtures/neg_reachable_error | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | 27f038d8 |
-| fixtures/neg_wide_input_u66 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 6ead5a2b |
+| fixtures/neg_wide_input_u128 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 73f115f9 |
 | fixtures/neg_width_above_max | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | f5d6d74e |
 | fixtures/neg_width_one | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | ef886fe0 |
 | fixtures/neg_width_unresolved | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | 890885ed |
@@ -572,18 +574,18 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 
 | column | ✅ | ❌ | ➖ |
 | --- | --- | --- | --- |
-| bn254 compile | 547 | 5 | 3 |
-| bn254 run | 544 | 3 | 8 |
-| bn254 return | 203 | 0 | 352 |
-| goldilocks compile | 493 | 59 | 3 |
-| goldilocks run | 477 | 16 | 62 |
-| goldilocks return | 168 | 0 | 387 |
-| AST | 466 | 27 | 62 |
+| bn254 compile | 548 | 6 | 3 |
+| bn254 run | 545 | 3 | 9 |
+| bn254 return | 204 | 0 | 353 |
+| goldilocks compile | 494 | 60 | 3 |
+| goldilocks run | 478 | 16 | 63 |
+| goldilocks return | 169 | 0 | 388 |
+| AST | 466 | 28 | 63 |
 
 | Fields | count |
 | --- | --- |
-| ✅ equal | 482 |
-| ✅ equal* | 2 |
+| ✅ equal | 483 |
+| ✅ equal* | 3 |
 | 🟡 predicted | 43 |
 | 🟡 field-dependent | 24 |
 | 🟡 both-sides | 1 |

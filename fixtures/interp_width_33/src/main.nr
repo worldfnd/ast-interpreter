@@ -37,7 +37,7 @@ where
     -x
 }
 
-fn main(a: u33, b: u33) -> pub u33 {
+fn check(a: u33, b: u33) -> u33 {
     let top: u33 = 1 << 32;
     let max: u33 = 8589934591;
     assert(a + b == 8);
@@ -111,4 +111,8 @@ fn main(a: u33, b: u33) -> pub u33 {
     assert(order(neg, sa));
     assert(negate(sa) == neg);
     a * b + (top >> 32)
+}
+
+fn main(a: u8, b: u8) -> pub u8 {
+    check(a as u33, b as u33) as u8
 }

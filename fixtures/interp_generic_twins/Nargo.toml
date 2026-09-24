@@ -1,0 +1,6 @@
+[package]
+name = "interp_generic_twins"
+type = "bin"
+authors = [""]
+
+[dependencies]

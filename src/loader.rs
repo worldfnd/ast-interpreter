@@ -55,20 +55,3 @@ impl PackageSource for NoirProject {
         &self.workspace.members[0]
     }
 }
-
-// Parked behind an always-false cfg until the mavros-compiler dependency is available; restore
-// `#[cfg(feature = "mavros-oracle")]` then.
-#[cfg(any())]
-impl PackageSource for mavros_compiler::project::Project {
-    fn file_manager(&self) -> &FileManager {
-        self.file_manager()
-    }
-
-    fn parsed_files(&self) -> &ParsedFiles {
-        self.parsed_files()
-    }
-
-    fn get_only_crate(&self) -> &Package {
-        self.get_only_crate()
-    }
-}

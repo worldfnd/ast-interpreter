@@ -99,10 +99,12 @@ fn diagnostic_detail(diagnostics: &[CustomDiagnostic]) -> String {
 }
 
 /// Prepare `source` and run the frontend on it under `field`, rejecting every error whichever
-/// file it lands in.
+/// file it lands in. `generic_builtins` is Noir's benchmark mode: the standard library's
+/// field-generic builtins in place of their `field`-specific twins.
 fn check_package<'s>(
     source: &'s impl PackageSource,
     field: FieldId,
+    generic_builtins: bool,
 ) -> Result<Context<'s, 's>, ValidationError> {
     let (mut context, crate_id) = nargo::prepare_package(
         source.file_manager(),
@@ -111,6 +113,7 @@ fn check_package<'s>(
     );
     let options = noirc_driver::CompileOptions {
         field,
+        generic_builtins,
         ..noirc_driver::CompileOptions::default()
     };
     noirc_driver::check_crate(&mut context, crate_id, &options).map_err(|diagnostics| {
@@ -159,7 +162,17 @@ pub(crate) fn compile_for_validation(
     source: &impl PackageSource,
     field: FieldId,
 ) -> Result<Validated, ValidationError> {
-    let mut context = check_package(source, field)?;
+    compile_for_validation_with(source, field, false)
+}
+
+/// [`compile_for_validation`] with Noir's benchmark mode chosen: with `generic_builtins`, the
+/// standard library's field-generic builtins replace their `field`-specific twins.
+pub(crate) fn compile_for_validation_with(
+    source: &impl PackageSource,
+    field: FieldId,
+    generic_builtins: bool,
+) -> Result<Validated, ValidationError> {
+    let mut context = check_package(source, field, generic_builtins)?;
     let main = context
         .get_main_function(context.root_crate_id())
         .ok_or_else(|| {
@@ -192,7 +205,7 @@ pub(crate) fn stdlib_tests(
     source: &impl PackageSource,
     field: FieldId,
 ) -> Result<Vec<StdlibTest>, ValidationError> {
-    let mut context = check_package(source, field)?;
+    let mut context = check_package(source, field, false)?;
     let stdlib = *context.stdlib_crate_id();
     let tests =
         context.get_all_test_functions_in_crate_matching(&stdlib, &FunctionNameMatch::Anything);
