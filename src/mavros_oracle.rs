@@ -18,6 +18,13 @@
 //! The release build matters: a debug build's stack frames and speed make the heaviest programs
 //! (ECDSA, the 2^17-gate benchmarks) overflow the child's stack or run past the budget.
 //!
+//! `Cargo.toml` keeps the `mavros-compiler` dependency commented out, since Cargo reads a path
+//! dependency's manifest even when its feature is off and CI has no Mavros checkout. Running the
+//! sweep is a local, uncommitted edit: un-comment that line, set
+//! `mavros-oracle = ["dep:mavros-compiler"]`, and add a `[patch."https://github.com/worldfnd/noir.git"]`
+//! table pointing every Noir crate at the checkout Mavros builds against, so both halves link one
+//! `FieldElement`. The pin test fails while such a patch is active; that is expected.
+//!
 //! `MAVROS_ORACLE_CORPUS` names a copy, not a checkout, because Mavros writes `mavros_debug/`
 //! into every package it compiles. `MAVROS_ORACLE_FIELD` defaults to bn254; `MAVROS_ORACLE_JOBS`
 //! (default 8) bounds the children in flight and `MAVROS_ORACLE_TIMEOUT_SECS` (default 600)
