@@ -36,7 +36,8 @@ where Noir's standard library reaches them.
 
 The `mavros-oracle` feature builds the differential oracle against Mavros (`src/mavros_oracle.rs`,
 whose module doc has the sweep command). It needs a `../mavros` checkout pinned to the same Noir
-revision, and LLVM 22 for the Mavros build.
+revision, and LLVM 22 for the Mavros build. Its `mavros-compiler` dependency is commented out in
+`Cargo.toml`, so CI needs no Mavros checkout; the module doc says what to un-comment to run it.
 
 `InterpretError` separates bad caller data (`InvalidInput`), runtime range errors
 (`ValueOutOfRange`), invalid AST value shapes (`Type`), and interpreter invariant failures

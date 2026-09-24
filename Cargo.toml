@@ -20,9 +20,13 @@ serde = { workspace = true }
 serde_json = { version = "1.0" }
 sha2 = "0.10"
 
-# Optional integration oracle: a Mavros checkout whose Noir crates are pinned to the same revision as
-# the ones above, so both halves share one `FieldElement` and one monomorphized AST.
-mavros-compiler = { path = "../mavros/compiler", optional = true }
+# Optional integration oracle against a Mavros checkout whose Noir crates are pinned to the same
+# revision as the ones above, so both halves share one `FieldElement` and one monomorphized AST.
+# The line stays commented out because Cargo loads a path dependency's manifest even when its
+# feature is off, and CI has no Mavros checkout. To run the oracle, un-comment it, make the
+# `mavros-oracle` feature forward to it, and patch `worldfnd/noir` to the checkout Mavros builds
+# against; `src/mavros_oracle.rs` spells the steps out.
+# mavros-compiler = { path = "../mavros/compiler", optional = true }
 
 [dev-dependencies]
 # Test package loading through stock Noir.
@@ -42,8 +46,9 @@ default = ["bn254-crypto"]
 # Route the embedded-curve, Pedersen-generator and Poseidon2 built-ins to `bn254_blackbox_solver`.
 bn254-crypto = ["dep:bn254_blackbox_solver"]
 
-# Integration oracle against the Mavros compiler.
-mavros-oracle = ["dep:mavros-compiler"]
+# Integration oracle against the Mavros compiler. Builds only once the `mavros-compiler` dependency
+# above is un-commented, and then reads ["dep:mavros-compiler"].
+mavros-oracle = []
 
 [lints]
 workspace = true
@@ -62,17 +67,17 @@ repository = "https://github.com/worldfnd/ast-interpreter"
 
 [workspace.dependencies]
 # Pin all Noir crates together so they share AST types and the linked `FieldElement`.
-acvm = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "acvm" }
-bn254_blackbox_solver = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "bn254_blackbox_solver", default-features = false }
-fm = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "fm" }
-nargo = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "nargo" }
-nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "nargo_toml" }
-noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_abi" }
-noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_artifacts" }
-noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_frontend" }
-noirc_printable_type = { git = "https://github.com/worldfnd/noir.git", rev = "225db3e18f0ffaeeb3919a668f78b9e9c867b41f", package = "noirc_printable_type" }
+acvm = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "acvm" }
+bn254_blackbox_solver = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "bn254_blackbox_solver", default-features = false }
+fm = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "fm" }
+nargo = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "nargo" }
+nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "noirc_abi" }
+noirc_artifacts = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "noirc_artifacts" }
+noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "noirc_frontend" }
+noirc_printable_type = { git = "https://github.com/worldfnd/noir.git", rev = "6a1e938795ed3bf14866617b4a18d465fb6db9d9", package = "noirc_printable_type" }
 
 # Shared crates.
 serde = { version = "1.0.204", features = ["derive"] }
@@ -83,19 +88,3 @@ tempfile = { version = "3.19.1" }
 [workspace.lints.clippy]
 style = { level = "allow", priority = -1 }
 complexity = { level = "allow", priority = -1 }
-
-# LOCAL ONLY: build against the uncommitted noir checkout next door instead of the pinned
-# revision, so `--generic-builtins` and the entry-point rule are visible before they are pushed.
-# Mavros's own noir dependencies are patched by the same table when it is built in this workspace.
-[patch."https://github.com/worldfnd/noir.git"]
-acvm = { path = "../noir/acvm-repo/acvm" }
-bn254_blackbox_solver = { path = "../noir/acvm-repo/bn254_blackbox_solver" }
-fm = { path = "../noir/compiler/fm" }
-nargo = { path = "../noir/tooling/nargo" }
-nargo_toml = { path = "../noir/tooling/nargo_toml" }
-noirc_abi = { path = "../noir/tooling/noirc_abi" }
-noirc_artifacts = { path = "../noir/tooling/noirc_artifacts" }
-noirc_driver = { path = "../noir/compiler/noirc_driver" }
-noirc_errors = { path = "../noir/compiler/noirc_errors" }
-noirc_frontend = { path = "../noir/compiler/noirc_frontend" }
-noirc_printable_type = { path = "../noir/compiler/noirc_printable_type" }
