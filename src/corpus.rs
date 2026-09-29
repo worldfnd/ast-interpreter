@@ -61,9 +61,6 @@ fn enabled_features() -> Vec<String> {
     if cfg!(feature = "bn254-crypto") {
         features.push("bn254-crypto".to_string());
     }
-    if cfg!(feature = "goldilocks") {
-        features.push("goldilocks".to_string());
-    }
     features
 }
 
@@ -544,11 +541,6 @@ mod tests {
     use crate::IntValue;
     use num_bigint::BigInt;
 
-    /// The tests below record under the field this build is linked against.
-    fn run_record_linked(program: &CorpusProgram) -> RunRecord {
-        run_record(program, FieldId::linked())
-    }
-
     fn write(dir: &Path, relative: &str, contents: &str) {
         let path = dir.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -605,11 +597,9 @@ mod tests {
 
     #[test]
     fn dump_provenance_records_the_build_features() {
-        let recorded = provenance(&fixtures_dir(), &[], FieldId::linked());
+        let recorded = provenance(&fixtures_dir(), &[], FieldId::Bn254);
         let json = serde_json::to_value(recorded).unwrap();
-        let expected = if cfg!(feature = "goldilocks") {
-            serde_json::json!(["goldilocks"])
-        } else if cfg!(feature = "bn254-crypto") {
+        let expected = if cfg!(feature = "bn254-crypto") {
             serde_json::json!(["bn254-crypto"])
         } else {
             serde_json::json!([])
@@ -704,7 +694,7 @@ mod tests {
 
     #[test]
     fn a_compile_failure_leaves_the_later_steps_not_run() {
-        let record = run_record_linked(&fixture_program("neg_reachable_error"));
+        let record = run_record(&fixture_program("neg_reachable_error"), FieldId::Bn254);
         assert!(record.load.passed(), "{:?}", record.load);
         assert!(
             !record.compile.passed(),
@@ -727,7 +717,7 @@ mod tests {
 
     #[test]
     fn a_returning_fixture_records_its_value_and_projection() {
-        let record = run_record_linked(&fixture_program("interp_inputs_u64"));
+        let record = run_record(&fixture_program("interp_inputs_u64"), FieldId::Bn254);
         assert!(record.compile.passed(), "{:?}", record.compile);
         assert!(record.interpret.passed(), "{:?}", record.interpret);
         assert_eq!(
@@ -743,19 +733,37 @@ mod tests {
         assert_eq!(record.oracle, StepOutcome::not_run("no recorded return"));
     }
 
+    /// bn254 records a return of `2^64`, which Goldilocks can hold neither as its result nor as a
+    /// recorded `Field`.
     #[test]
     fn an_unrepresentable_recorded_return_leaves_the_return_check_not_run() {
-        let record = run_record_linked(&fixture_program("interp_return_i64"));
-        assert!(record.interpret.passed(), "{:?}", record.interpret);
-        if cfg!(feature = "goldilocks") {
-            assert!(
-                matches!(&record.oracle, StepOutcome::NotRun { reason } if reason.starts_with("recorded return:")),
-                "{:?}",
-                record.oracle
-            );
-        } else {
-            assert!(record.oracle.passed(), "{:?}", record.oracle);
-        }
+        let root = temp_noir_package(
+            "above_modulus",
+            "fn main(x: Field) -> pub Field { x * 4294967296 * 4294967296 }",
+        );
+        std::fs::write(
+            root.path().join("Prover.toml"),
+            "x = \"1\"\nreturn = \"18446744073709551616\"\n",
+        )
+        .unwrap();
+        let program = CorpusProgram {
+            name: "above_modulus".to_string(),
+            dir: root.path().to_path_buf(),
+            workspace: false,
+            source_hash: "unhashed".to_string(),
+        };
+
+        let bn254 = run_record(&program, FieldId::Bn254);
+        assert!(bn254.interpret.passed(), "{:?}", bn254.interpret);
+        assert!(bn254.oracle.passed(), "{:?}", bn254.oracle);
+
+        let goldilocks = run_record(&program, FieldId::Goldilocks);
+        assert!(goldilocks.interpret.passed(), "{:?}", goldilocks.interpret);
+        assert!(
+            matches!(&goldilocks.oracle, StepOutcome::NotRun { reason } if reason.starts_with("recorded return:")),
+            "{:?}",
+            goldilocks.oracle
+        );
     }
 
     #[test]

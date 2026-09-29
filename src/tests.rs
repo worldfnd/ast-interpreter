@@ -30,18 +30,38 @@ fn negative_fixture(name: &str) -> PathBuf {
     fixture(&format!("neg_{name}"))
 }
 
-/// Compile a fixture through Noir's frontend + monomorphizer and interpret the resulting AST.
-fn interpret_fixture(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let project = NoirProject::new(fixture(name))?;
-    let validated = compile_for_validation(&project, FieldId::linked())?;
-    Ok(interpret(&validated.program, validated.field_id)?)
+fn assert_fixture_unit_under_both_fields(name: &str) {
+    let project = NoirProject::new(fixture(name)).expect("project");
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_for_validation(&project, field)
+            .unwrap_or_else(|error| panic!("{name}: {field}: frontend: {error}"));
+        assert_eq!(
+            interpret(&validated.program, validated.field_id).expect("interpret"),
+            Value::Unit,
+            "{name}: {field}"
+        );
+    }
 }
 
+/// The fixture returns `expected` under both fields, from its `Prover.toml` inputs.
 fn assert_fixture_return(name: &str, expected: Value) {
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        assert_fixture_return_under(field, name, expected.clone());
+    }
+}
+
+fn assert_fixture_return_under(field: FieldId, name: &str, expected: Value) {
+    let (result, recorded) = run_fixture(field, name);
+    assert_eq!(result, expected, "{name}: {field}");
+    assert_eq!(recorded, Some(expected), "{name}: {field}: recorded return");
+}
+
+/// The fixture's return under `field` from its `Prover.toml` inputs, and the return it records.
+fn run_fixture(field: FieldId, name: &str) -> (Value, Option<Value>) {
     let root = fixture(name);
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked())
-        .unwrap_or_else(|error| panic!("{name}: frontend: {error}"));
+    let validated = compile_for_validation(&project, field)
+        .unwrap_or_else(|error| panic!("{name}: {field}: frontend: {error}"));
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
     let inputs = inputs_from_prover_toml(
         &validated.program,
@@ -49,18 +69,17 @@ fn assert_fixture_return(name: &str, expected: Value) {
         &toml,
         validated.field_id,
     )
-    .unwrap_or_else(|error| panic!("{name}: inputs: {error}"));
+    .unwrap_or_else(|error| panic!("{name}: {field}: inputs: {error}"));
     let result = interpret_with_inputs(&validated.program, inputs, validated.field_id)
-        .unwrap_or_else(|error| panic!("{name}: interpret: {error}"));
+        .unwrap_or_else(|error| panic!("{name}: {field}: interpret: {error}"));
     let recorded = expected_return_from_prover_toml(
         &validated.program,
         &validated.abi,
         &toml,
         validated.field_id,
     )
-    .unwrap_or_else(|error| panic!("{name}: recorded return: {error}"));
-    assert_eq!(result, expected, "{name}");
-    assert_eq!(recorded, Some(expected), "{name}: recorded return");
+    .unwrap_or_else(|error| panic!("{name}: {field}: recorded return: {error}"));
+    (result, recorded)
 }
 
 fn compile_source(source: &str, field: FieldId) -> Validated {
@@ -102,28 +121,116 @@ fn one_build_interprets_a_program_under_two_fields() {
 }
 
 #[test]
-fn toml_bridge_requires_the_linked_field() {
+fn a_scalar_whose_abi_type_disagrees_with_its_program_type_is_refused() {
+    use noirc_abi::input_parser::InputValue;
+    use noirc_abi::{AbiType, Sign};
+    use noirc_frontend::monomorphization::ast::Type;
+    use noirc_frontend::shared::Signedness;
+
+    let u64_abi = AbiType::Integer {
+        sign: Sign::Unsigned,
+        width: 64,
+    };
+    let u8_abi = AbiType::Integer {
+        sign: Sign::Unsigned,
+        width: 8,
+    };
+    let input = InputValue::Field(5u8.into());
+    for (abi_type, typ) in [
+        (AbiType::Field, Type::Bool),
+        (u64_abi.clone(), Type::Bool),
+        (u64_abi, Type::Integer(Signedness::Unsigned, 8)),
+        (u8_abi, Type::Integer(Signedness::Signed, 8)),
+        (AbiType::Boolean, Type::Field),
+    ] {
+        let result = crate::input::value_from_input(&input, &abi_type, &typ, FieldId::Bn254);
+        assert!(
+            matches!(result, Err(InterpretError::Internal(_))),
+            "{abi_type:?} as {typ:?}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn toml_bridge_reads_inputs_in_the_programs_field() {
     for field in [FieldId::Bn254, FieldId::Goldilocks] {
         let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
         for (toml, expected) in [
             ("x = -1\nreturn = -1", -FieldValue::one(field)),
             ("x = 1\nreturn = 1", FieldValue::one(field)),
         ] {
-            let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, toml, field);
+            let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, toml, field)
+                .unwrap_or_else(|error| panic!("{field}: {toml}: {error}"));
             let recorded =
-                expected_return_from_prover_toml(&validated.program, &validated.abi, toml, field);
-            if field == FieldId::linked() {
-                assert_eq!(inputs.unwrap(), vec![Value::Field(expected.clone())]);
-                assert_eq!(recorded.unwrap(), Some(Value::Field(expected)));
-            } else {
-                assert!(
-                    matches!(inputs, Err(InterpretError::InvalidInput(_))),
-                    "{field}: {inputs:?}"
-                );
-                assert!(
-                    matches!(recorded, Err(InterpretError::InvalidInput(_))),
-                    "{field}: {recorded:?}"
-                );
+                expected_return_from_prover_toml(&validated.program, &validated.abi, toml, field)
+                    .unwrap_or_else(|error| panic!("{field}: {toml}: {error}"));
+            assert_eq!(
+                inputs,
+                vec![Value::Field(expected.clone())],
+                "{field}: {toml}"
+            );
+            assert_eq!(recorded, Some(Value::Field(expected)), "{field}: {toml}");
+        }
+    }
+}
+
+#[test]
+fn the_input_bridge_follows_the_abi_boundary_vectors() {
+    use noirc_abi::conformance::boundary_vectors;
+    use noirc_abi::input_parser::Format;
+    use noirc_abi::{AbiParameter, AbiType, AbiVisibility, Sign};
+    use noirc_frontend::monomorphization::ast::Type;
+    use noirc_frontend::shared::Signedness;
+
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let config = FieldConfig::new(field);
+        for vector in boundary_vectors(config) {
+            let abi = noirc_abi::Abi {
+                parameters: vec![AbiParameter {
+                    name: "x".to_string(),
+                    typ: vector.typ.clone(),
+                    visibility: AbiVisibility::Private,
+                }],
+                return_type: None,
+                error_types: Default::default(),
+            };
+            let typ = match &vector.typ {
+                AbiType::Field => Type::Field,
+                AbiType::Boolean => Type::Bool,
+                AbiType::Integer { sign, width } => {
+                    let signedness = match sign {
+                        Sign::Unsigned => Signedness::Unsigned,
+                        Sign::Signed => Signedness::Signed,
+                    };
+                    Type::Integer(signedness, *width)
+                }
+                other => panic!("boundary vectors are scalars, got {other:?}"),
+            };
+            let parsed = Format::Toml.parse(&format!("x = {}", vector.spelling), &abi, config);
+            match (parsed, &vector.element) {
+                (Ok(inputs), Some(element)) => {
+                    let value =
+                        crate::input::value_from_input(&inputs["x"], &vector.typ, &typ, field)
+                            .unwrap_or_else(|error| panic!("{field}: {vector:?}: {error}"));
+                    let expected = match &typ {
+                        Type::Field => Value::Field(
+                            FieldValue::try_from_biguint(element.clone(), field)
+                                .expect("an accepted element is below the modulus"),
+                        ),
+                        Type::Bool => Value::Bool(*element == 1u8.into()),
+                        Type::Integer(signedness, bits) => Value::Int(IntValue::canonical(
+                            signedness.is_signed(),
+                            *bits,
+                            BigInt::from(element.clone()),
+                        )),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(value, expected, "{field}: {vector:?}");
+                }
+                (Err(_), None) => {}
+                (parsed, element) => {
+                    panic!("{field}: {vector:?}: parsed {parsed:?}, expected {element:?}")
+                }
             }
         }
     }
@@ -131,12 +238,7 @@ fn toml_bridge_requires_the_linked_field() {
 
 #[test]
 fn rejects_inputs_from_another_field() {
-    let field = FieldId::linked();
-    let other = if field == FieldId::Bn254 {
-        FieldId::Goldilocks
-    } else {
-        FieldId::Bn254
-    };
+    let (field, other) = (FieldId::Bn254, FieldId::Goldilocks);
     let good = Value::Field(FieldValue::one(field));
     let bad = Value::Field(FieldValue::one(other));
     let cell = |value: &Value| Rc::new(RefCell::new(value.clone()));
@@ -225,9 +327,7 @@ fn rejects_an_integer_input_outside_its_type() {
 /// a `comptime` block.
 #[test]
 fn interprets_casts_above_the_modulus() {
-    let result =
-        interpret_fixture("interp_casts_above_modulus").expect("interpretation should succeed");
-    assert_eq!(result, Value::Unit, "main returns unit");
+    assert_fixture_unit_under_both_fields("interp_casts_above_modulus");
 }
 
 /// A false (non-const-folded) assertion interprets to `AssertionFailed`, not a clean pass.
@@ -252,7 +352,7 @@ fn rejects_reachable_type_error() {
 fn interprets_fixture_inputs_from_prover_toml() {
     let root = fixture("interp_inputs_u64");
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
+    let validated = compile_for_validation(&project, FieldId::Bn254).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
     let inputs = inputs_from_prover_toml(
         &validated.program,
@@ -276,66 +376,33 @@ fn interprets_fixture_inputs_from_prover_toml() {
     assert_eq!(result, expected, "input bridge must feed x = 3");
 }
 
-/// Signed i32 inputs decode identically on both fields and drive signed arithmetic.
-/// `a = -7, b = 2` → `-121`.
+/// `Prover.toml` inputs give the same result under both fields: signed i32 arithmetic
+/// (`a = -7, b = 2` → `-121`), struct fields bound in declaration order rather than the ABI's
+/// alphabetical one (`3706`), an array with a signed branch (`295`) and an enum `match` binding a
+/// variant's payload (`x = 3` → `12`).
 #[test]
-fn interprets_signed_i32_input() {
-    let root = fixture("interp_inputs_i32");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: true,
-            bits: 32,
-            value: BigInt::from(-121)
-        })
-    );
-}
-
-/// bn254 i64 control: with 2^64 < p the encoding is injective, so `x = -1` decodes correctly.
-#[cfg(not(feature = "goldilocks"))]
-#[test]
-fn bn254_decodes_signed_i64_input() {
-    let root = fixture("neg_interp_inputs_i64");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: true,
-            bits: 64,
-            value: BigInt::from(-1)
-        })
-    );
+fn interprets_prover_toml_inputs() {
+    let u32v = |v: u32| Value::Int(IntValue::canonical(false, 32, BigInt::from(v)));
+    for (name, expected) in [
+        (
+            "interp_inputs_i32",
+            Value::Int(IntValue::canonical(true, 32, BigInt::from(-121))),
+        ),
+        ("interp_inputs_struct", u32v(3706)),
+        ("interp_inputs_mixed", u32v(295)),
+        ("interp_match_enum", u32v(12)),
+    ] {
+        for field in [FieldId::Bn254, FieldId::Goldilocks] {
+            assert_eq!(run_fixture(field, name).0, expected, "{name}: {field}");
+        }
+    }
 }
 
 /// `u64` can exceed the Goldilocks modulus, so the compiler refuses `x as Field` there.
-#[cfg(feature = "goldilocks")]
 #[test]
 fn goldilocks_rejects_u64_to_field_cast() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
-    let err = match compile_for_validation(&project, FieldId::linked()) {
+    let err = match compile_for_validation(&project, FieldId::Goldilocks) {
         Ok(_) => panic!("u64 as Field must not compile under Goldilocks"),
         Err(e) => e,
     };
@@ -343,12 +410,11 @@ fn goldilocks_rejects_u64_to_field_cast() {
 }
 
 /// Under bn254 every `u64` is below the modulus and the cast is the identity on the value.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn bn254_casts_u64_to_field_exactly() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = format!("x = \"{}\"", u64::MAX);
+    let validated = compile_for_validation(&project, FieldId::Bn254).expect("frontend");
+    let toml = format!("hi = \"{}\"\nlo = \"{}\"", u32::MAX, u32::MAX);
     let inputs = inputs_from_prover_toml(
         &validated.program,
         &validated.abi,
@@ -364,150 +430,43 @@ fn bn254_casts_u64_to_field_exactly() {
     assert_eq!(result, Value::Field(expected));
 }
 
-/// `-2^32` has the pattern `p - 1`; `-1` has the pattern `2^64 - 1`, which exceeds the modulus.
-#[cfg(feature = "goldilocks")]
 #[test]
-fn goldilocks_validates_i64_input_patterns() {
-    let root = fixture("neg_interp_inputs_i64");
-    let project = NoirProject::new(root).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let run = |toml: &str| {
-        inputs_from_prover_toml(&validated.program, &validated.abi, toml, validated.field_id)
-            .and_then(|inputs| {
-                interpret_with_inputs(&validated.program, inputs, validated.field_id)
-            })
-    };
-    let expected = |v: i64| {
-        Value::Int(IntValue {
-            signed: true,
-            bits: 64,
-            value: BigInt::from(v),
-        })
-    };
-    for toml in ["x = -4294967296", "x = \"-4294967296\""] {
-        assert_eq!(run(toml).expect(toml), expected(-4294967296), "{toml}");
-    }
-    assert_eq!(run("x = \"1\"").expect("x = \"1\""), expected(1));
-    for toml in ["x = \"-1\"", "x = -1"] {
+fn goldilocks_refuses_an_entry_point_integer_that_can_reach_its_modulus() {
+    for name in [
+        "interp_inputs_i64",
+        "interp_return_i64",
+        "neg_wide_input_u66",
+    ] {
+        let project = NoirProject::new(fixture(name)).expect("project");
         assert!(
-            matches!(run(toml), Err(InterpretError::InvalidInput(_))),
-            "{toml}"
+            compile_for_validation(&project, FieldId::Bn254).is_ok(),
+            "{name}: bn254 takes this entry point"
+        );
+        let error = match compile_for_validation(&project, FieldId::Goldilocks) {
+            Ok(_) => panic!("{name}: this entry point must not compile under Goldilocks"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid type found in the entry point to a program"),
+            "{name}: {error}"
         );
     }
-}
-
-/// Struct inputs map by declaration order, not the alphabetical ABI map, at every nesting level.
-/// `zeta*1000 + alpha*100 + (1+2+3) == 3706`.
-#[test]
-fn interprets_struct_input_by_declaration_order() {
-    let root = fixture("interp_inputs_struct");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: false,
-            bits: 32,
-            value: BigInt::from(3706)
-        })
-    );
-}
-
-/// Array input, helper call, indexed loop, and a signed conditional, all from `Prover.toml`.
-/// `xs=[10,20,30,40]` (weighted `300`), `k=-3` (negative branch) → `300 - 5 == 295`.
-#[test]
-fn interprets_mixed_inputs() {
-    let root = fixture("interp_inputs_mixed");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: false,
-            bits: 32,
-            value: BigInt::from(295)
-        })
-    );
 }
 
 /// A `&mut` threaded through `main -> twice -> bump` mutates one shared cell: `100 + 5 + 5 == 110`.
 #[test]
 fn interprets_reference_call_chain() {
-    let root = fixture("interp_refs_call_chain");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: false,
-            bits: 64,
-            value: BigInt::from(110)
-        })
+    assert_fixture_return(
+        "interp_refs_call_chain",
+        Value::Int(IntValue::canonical(false, 32, BigInt::from(110))),
     );
 }
 
 #[test]
 fn interprets_field_projections_through_references() {
-    assert_eq!(
-        interpret_fixture("interp_refs_offset_receiver").unwrap(),
-        Value::Unit
-    );
-}
-
-/// An enum `match` binds a variant's payload via the `(tag, payload…)` tuple. `x = 3` → `3 * 4 == 12`.
-#[test]
-fn interprets_enum_match() {
-    let root = fixture("interp_match_enum");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
-    let result =
-        interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    assert_eq!(
-        result,
-        Value::Int(IntValue {
-            signed: false,
-            bits: 32,
-            value: BigInt::from(12)
-        })
-    );
+    assert_fixture_unit_under_both_fields("interp_refs_offset_receiver");
 }
 
 /// A literal-integer `match`: an exact case (`x = 2 => 300`), the wildcard `default_case`
@@ -636,7 +595,6 @@ fn stored_format_strings_render_with_their_type_names() {
 }
 
 /// A `main` with inputs interprets correctly from `Prover.toml`. `assert_statement` has `x == y == 3`.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn interprets_program_with_inputs() {
     let program_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -650,24 +608,26 @@ fn interprets_program_with_inputs() {
     copy_dir(&program_dir, &root);
 
     let project = NoirProject::new(root.clone()).unwrap();
-    let validated = compile_for_validation(&project, FieldId::linked()).unwrap();
     let toml = std::fs::read_to_string(root.join("Prover.toml")).unwrap();
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .unwrap();
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_for_validation(&project, field).unwrap();
+        let inputs = inputs_from_prover_toml(
+            &validated.program,
+            &validated.abi,
+            &toml,
+            validated.field_id,
+        )
+        .unwrap();
 
-    let result = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
-    assert_eq!(result, Value::Unit);
+        let result = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
+        assert_eq!(result, Value::Unit, "{field}");
+    }
 }
 
 /// Differential correctness: the interpreter's computed return value matches the expected output
-/// Noir's corpus records in `Prover.toml`. `arithmetic_binary_operations` returns 10 (a u64),
-/// so this verifies the actual value, not merely that interpretation didn't error.
-#[cfg(not(feature = "goldilocks"))]
+/// Noir's corpus records in `Prover.toml`. `arithmetic_binary_operations` returns the `Field` 10
+/// under both fields, so this verifies the actual value, not merely that interpretation didn't
+/// error.
 #[test]
 fn interpreter_return_matches_recorded_expected() {
     let program_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -681,58 +641,31 @@ fn interpreter_return_matches_recorded_expected() {
     copy_dir(&program_dir, &root);
 
     let project = NoirProject::new(root.clone()).unwrap();
-    let validated = compile_for_validation(&project, FieldId::linked()).unwrap();
     let toml = std::fs::read_to_string(root.join("Prover.toml")).unwrap();
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_for_validation(&project, field).unwrap();
+        let inputs = inputs_from_prover_toml(
+            &validated.program,
+            &validated.abi,
+            &toml,
+            validated.field_id,
+        )
+        .unwrap();
+        let value = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
+        let expected = expected_return_from_prover_toml(
+            &validated.program,
+            &validated.abi,
+            &toml,
+            validated.field_id,
+        )
+        .unwrap()
+        .expect("this program records a return value");
 
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .unwrap();
-    let value = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
-    let expected = expected_return_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .unwrap()
-    .expect("this program records a return value");
-
-    assert_eq!(
-        value, expected,
-        "interpreter output must match Noir's recorded return"
-    );
-}
-
-/// A `u64` program whose constant exceeds the Goldilocks modulus (`p + 1`) compiles under goldilocks
-/// and computes the correct native `u64` result, proving the frontend did not corrupt the integer.
-#[cfg(feature = "goldilocks")]
-#[test]
-fn validates_goldilocks_mono_ast_u64() {
-    let project = NoirProject::new(fixture("interp_inputs_u64")).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked())
-        .expect("goldilocks frontend should produce a mono-AST for a stdlib-free u64 program");
-
-    // main(x: u64) -> u64 = x * 2 + (p + 1). With x = 3: 6 + 18446744069414584322.
-    let x = Value::Int(IntValue {
-        signed: false,
-        bits: 64,
-        value: BigInt::from(3u64),
-    });
-    let result =
-        interpret_with_inputs(&validated.program, vec![x], validated.field_id).expect("interpret");
-    let expected = Value::Int(IntValue {
-        signed: false,
-        bits: 64,
-        value: BigInt::from(18446744069414584328u64),
-    });
-    assert_eq!(
-        result, expected,
-        "Goldilocks mono-AST must carry p+1 exactly and compute the native u64 result"
-    );
+        assert_eq!(
+            value, expected,
+            "{field}: interpreter output must match Noir's recorded return"
+        );
+    }
 }
 
 #[test]
@@ -748,9 +681,14 @@ fn interprets_integer_widths() {
         (128, 16),
         (16384, 16),
     ] {
+        let returned_width = if bits > 63 { 8 } else { bits };
         assert_fixture_return(
             &format!("interp_width_{bits}"),
-            Value::Int(IntValue::canonical(false, bits, BigInt::from(returned))),
+            Value::Int(IntValue::canonical(
+                false,
+                returned_width,
+                BigInt::from(returned),
+            )),
         );
     }
 }
@@ -809,7 +747,7 @@ fn interprets_stdlib_fixtures() {
     for (name, expected) in [
         (
             "interp_wrapping_ops",
-            Value::Int(IntValue::canonical(false, 64, BigInt::from(7))),
+            Value::Int(IntValue::canonical(false, 32, BigInt::from(7))),
         ),
         ("interp_hash_limbs", Value::Bool(false)),
         ("interp_field_lt", Value::Bool(true)),
@@ -832,31 +770,12 @@ fn interprets_stdlib_fixtures() {
     }
 }
 
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn bn254_accepts_input_above_the_goldilocks_modulus() {
-    assert_fixture_return(
+    assert_fixture_return_under(
+        FieldId::Bn254,
         "neg_wide_input_u66",
         Value::Int(IntValue::canonical(false, 66, BigInt::from(1u8) << 65usize)),
-    );
-}
-
-#[cfg(feature = "goldilocks")]
-#[test]
-fn goldilocks_rejects_input_above_its_modulus() {
-    let root = fixture("neg_wide_input_u66");
-    let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, FieldId::linked()).expect("frontend");
-    let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    );
-    assert!(
-        matches!(inputs, Err(InterpretError::InvalidInput(_))),
-        "{inputs:?}"
     );
 }
 
@@ -865,20 +784,27 @@ fn goldilocks_rejects_input_above_its_modulus() {
 
 /// Run every argument-less stdlib test; only explicitly disabled crypto is a coverage gap.
 #[test]
-fn the_stdlib_tests_pass_under_the_linked_field() {
+fn the_stdlib_tests_pass_under_bn254() {
+    stdlib_tests_pass_under(FieldId::Bn254);
+}
+
+#[test]
+fn the_stdlib_tests_pass_under_goldilocks() {
+    stdlib_tests_pass_under(FieldId::Goldilocks);
+}
+
+fn stdlib_tests_pass_under(field: FieldId) {
     let root = temp_noir_package("test", "fn main() {}");
     let project = NoirProject::new(root.path().to_path_buf()).expect("project");
     let (mut passed, mut gaps, mut failures) = (0, Vec::new(), Vec::new());
-    for test in stdlib_tests(&project, FieldId::linked()).expect("frontend") {
+    for test in stdlib_tests(&project, field).expect("frontend") {
         let outcome = match test.program {
             Err(error) if matches!(test.scope, TestScope::ShouldFailWith { .. }) => {
                 expected_test_outcome(&test.scope, Some(error.summary().to_string()))
             }
             Err(error) => Err(format!("monomorphization: {error}")),
             Ok(program) => {
-                match panic::catch_unwind(AssertUnwindSafe(|| {
-                    interpret(&program, FieldId::linked())
-                })) {
+                match panic::catch_unwind(AssertUnwindSafe(|| interpret(&program, field))) {
                     Err(payload) => Err(format!("panic: {}", panic_message(payload.as_ref()))),
                     Ok(Err(InterpretError::Unsupported(what)))
                         if !cfg!(feature = "bn254-crypto")
@@ -903,13 +829,12 @@ fn the_stdlib_tests_pass_under_the_linked_field() {
         }
     }
     println!(
-        "stdlib tests under {}: {passed} passed, {} gaps\n{}",
-        FieldId::linked(),
+        "stdlib tests under {field}: {passed} passed, {} gaps\n{}",
         gaps.len(),
         gaps.join("\n")
     );
-    assert!(passed > 0, "no stdlib tests ran");
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(passed > 0, "{field}: no stdlib tests ran");
+    assert!(failures.is_empty(), "{field}:\n{}", failures.join("\n"));
 }
 
 /// Whether a test's result is the one its scope asks for.
@@ -1066,7 +991,12 @@ fn oracle_compare(program_dir: &Path) -> String {
                         Err(e) => return format!("oracle-errored: {e}"),
                     };
                     match validated.abi.return_type.as_ref() {
-                        Some(r) => match crate::input::value_from_input(&iv, &r.abi_type, ret_ty) {
+                        Some(r) => match crate::input::value_from_input(
+                            &iv,
+                            &r.abi_type,
+                            ret_ty,
+                            FieldId::linked(),
+                        ) {
                             Ok(v) => v,
                             Err(e) => return format!("oracle-errored: decode: {e}"),
                         },
@@ -1104,11 +1034,10 @@ fn oracle_compare(program_dir: &Path) -> String {
 }
 
 /// Compare the fixtures supported by the BN254 executor with the interpreter.
-#[cfg(not(feature = "goldilocks"))]
 #[test]
 fn oracle_matches_interpreter_smoke() {
     // interp_inputs_mixed is left out: its shape trips Noir's ACIR flattening pass, so the executor
-    // cannot judge it (the interpreter still runs it — see `interprets_mixed_inputs`).
+    // cannot judge it (the interpreter still runs it — see `interprets_prover_toml_inputs`).
     for name in [
         "interp_basic",
         "interp_inputs_u64",
@@ -1202,7 +1131,7 @@ fn oracle_survey_execution_success() {
 }
 
 // Parked behind an always-false cfg until the mavros-compiler dependency is available; restore
-// `#[cfg(all(feature = "mavros-oracle", not(feature = "goldilocks")))]` then.
+// `#[cfg(feature = "mavros-oracle")]` then.
 #[cfg(any())]
 mod mavros_oracle {
     use super::{

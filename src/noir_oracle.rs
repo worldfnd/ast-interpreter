@@ -5,6 +5,7 @@
 //! Without `bn254-crypto` the executor gets a stub black-box solver, so curve and Poseidon2
 //! opcodes fail.
 
+use acvm::FieldConfig;
 use noirc_abi::input_parser::{Format, InputValue};
 use noirc_abi::{InputMap, MAIN_RETURN_NAME};
 use noirc_driver::{CompileOptions, compile_main};
@@ -27,11 +28,12 @@ pub(crate) fn noir_execute_return(
         compile_main(&mut context, crate_id, &CompileOptions::default(), None)
             .map_err(|errs| format!("compile: {errs:?}"))?;
 
-    // Prover.toml -> parameter inputs. The parser also yields a `return` entry (the corpus's
-    // recorded output); drop it, since `encode` wants only `main`'s parameters.
+    // Prover.toml -> parameter inputs, in the linked field the executor computes in. The parser
+    // also yields a `return` entry (the corpus's recorded output); drop it, since `encode` wants
+    // only `main`'s parameters.
     let mut input_map: InputMap = match prover_toml {
         Some(src) => Format::Toml
-            .parse(src, &compiled.abi)
+            .parse(src, &compiled.abi, FieldConfig::linked())
             .map_err(|e| format!("inputs: {e}"))?,
         None => InputMap::new(),
     };
