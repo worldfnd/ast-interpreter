@@ -1,0 +1,6 @@
+[package]
+name = "interp_str_bytes"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -92,11 +92,9 @@ impl<'p> Interpreter<'p> {
             }
 
             Expression::Unary(unary) => match &unary.operator {
+                // `skip` marks an offset through a reference, which already is the reference.
+                UnaryOp::Reference { .. } if unary.skip => self.eval_expr_value(&unary.rhs, env)?,
                 // `&`/`&mut`: reuse a slot's cell to alias it, else box the value in a fresh cell.
-                // The `skip` flag (set for `&mut a.b.c` taken through a reference field, where
-                // member access is elaborated as an offset that already denotes the reference)
-                // doesn't change this: `eval_place` peels to the live cell either way, while
-                // evaluating the rhs as a value would drop the reference.
                 UnaryOp::Reference { .. } => match self.eval_place(&unary.rhs, env)? {
                     Value::Ref(cell, true) => Value::Ref(cell, false),
                     other => Value::Ref(Rc::new(RefCell::new(other)), false),
@@ -207,7 +205,11 @@ impl<'p> Interpreter<'p> {
             }
 
             Expression::ExtractTupleField(tuple, field) => {
-                self.eval_expr_value(tuple, env)?.tuple_field(*field)?
+                match self.eval_expr_value(tuple, env)? {
+                    // Reference projections alias the field; value reads have a Dereference node.
+                    Value::Ref(cell, _) => project_reference(&cell, *field)?,
+                    other => other.tuple_field(*field)?,
+                }
             }
 
             Expression::Call(call) => {
@@ -226,9 +228,6 @@ impl<'p> Interpreter<'p> {
 
             Expression::Let(let_) => {
                 let value = match self.eval(&let_.expression, env)? {
-                    Flow::Normal(value) if holds_lossy_str(&value) => {
-                        return Err(lossy_string_stored());
-                    }
                     Flow::Normal(value) => value,
                     flow => return Ok(flow),
                 };
@@ -258,9 +257,6 @@ impl<'p> Interpreter<'p> {
 
             Expression::Assign(assign) => {
                 let value = match self.eval(&assign.expression, env)? {
-                    Flow::Normal(value) if holds_lossy_str(&value) => {
-                        return Err(lossy_string_stored());
-                    }
                     Flow::Normal(value) => value,
                     flow => return Ok(flow),
                 };
@@ -382,10 +378,7 @@ impl<'p> Interpreter<'p> {
             },
             Literal::Bool(b) => Value::Bool(*b),
             Literal::Unit => Value::Unit,
-            // Noir strings may be non-UTF-8; ours is a Rust `String`, so tolerate that case.
-            Literal::Str(s) => Value::Str(String::from_utf8(s.clone()).map_err(|e| {
-                InterpretError::Unsupported(format!("non-UTF-8 string literal: {e}"))
-            })?),
+            Literal::Str(bytes) => Value::Str(bytes.clone()),
             Literal::Array(array) | Literal::Vector(array) => {
                 let mut elements = Vec::with_capacity(array.contents.len());
                 for element in &array.contents {
@@ -403,20 +396,11 @@ impl<'p> Interpreter<'p> {
                         .collect(),
                 )
             }
-            Literal::FmtStr(fragments, _count, captures) => {
-                let values = self.eval_fmt_captures(captures, env)?;
-                let (types, lossy) = capture_types(captures)?;
-                let text = format_fmt_str(fragments, &values, &types)?;
-                if lossy
-                    || values
-                        .iter()
-                        .any(|value| matches!(value, Value::LossyStr(_)))
-                {
-                    Value::LossyStr(text)
-                } else {
-                    Value::Str(text)
-                }
-            }
+            // Defer rendering until the assertion supplies the captures' original type names.
+            Literal::FmtStr(fragments, _count, captures) => Value::FmtStr {
+                fragments: fragments.clone(),
+                captures: self.eval_fmt_captures(captures, env)?,
+            },
         };
         Ok(value)
     }
@@ -589,23 +573,25 @@ impl<'p> Interpreter<'p> {
         }
     }
 
-    /// Render an assertion's failure message using its original type metadata when available.
+    /// Render with the message's original type metadata, including aggregate names.
     fn render_assert_message(
         &mut self,
         expr: &'p Expression,
         typ: &HirType,
         env: &mut Frame,
     ) -> Option<String> {
-        if let Expression::Literal(Literal::FmtStr(fragments, _count, captures)) = expr {
-            let values = self.eval_fmt_captures(captures, env).ok()?;
-            let PrintableType::FmtString { typ, .. } = PrintableType::from(typ) else {
-                return None;
-            };
-            let types = printable_capture_types(*typ)?;
-            return format_fmt_str(fragments, &values, &types).ok();
-        }
-        match self.eval_expr_value(expr, env) {
-            Ok(Value::Str(s) | Value::LossyStr(s)) => Some(s),
+        match self.eval_expr_value(expr, env).ok()? {
+            Value::Str(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            Value::FmtStr {
+                fragments,
+                captures,
+            } => {
+                let PrintableType::FmtString { typ, .. } = PrintableType::from(typ) else {
+                    return None;
+                };
+                let types = printable_capture_types(*typ)?;
+                format_fmt_str(&fragments, &captures, &types).ok()
+            }
             _ => None,
         }
     }
@@ -640,9 +626,7 @@ impl<'p> Interpreter<'p> {
                 _ => self.eval_expr_value(expr, env),
             },
             Expression::ExtractTupleField(inner, i) => {
-                // Peel through any depth of references to the live tuple cells (the same helper the
-                // write side uses), so `&mut pp.field` through a `&mut &mut S` aliases the real
-                // cell rather than a one-level snapshot.
+                // Peel through references to the live tuple cells, as the write side does.
                 let cells = tuple_cells_of(self.eval_place(inner, env)?)?;
                 let cell = cells.get(*i).cloned().ok_or_else(|| {
                     InterpretError::Type(format!("tuple field {i} out of bounds"))
@@ -856,6 +840,23 @@ fn strip_clone(lvalue: &LValue) -> &LValue {
     current
 }
 
+/// Project onto a shared field cell, preserving the operand's reference depth.
+fn project_reference(cell: &Rc<RefCell<Value>>, i: usize) -> Result<Value, InterpretError> {
+    let projected = match &*cell.borrow() {
+        Value::Tuple(cells) => cells
+            .get(i)
+            .cloned()
+            .ok_or_else(|| InterpretError::Type(format!("tuple field {i} out of bounds")))?,
+        Value::Ref(inner, _) => Rc::new(RefCell::new(project_reference(inner, i)?)),
+        other => {
+            return Err(InterpretError::Type(format!(
+                "cannot extract field {i} through a reference to {other:?}"
+            )));
+        }
+    };
+    Ok(Value::Ref(projected, false))
+}
+
 /// A tuple's shared cells, peeling through any depth of references. The shared peel primitive for
 /// both the write side (`MemberAccess` assign) and the ref-take side (`eval_place`), so field
 /// access reaches the live cell at any nesting. Any other shape is a reference pattern we don't
@@ -905,64 +906,8 @@ fn same_aggregate_shape(a: &Value, b: &Value) -> bool {
     )
 }
 
-/// The printable types of a format string's captures, and whether formatting them loses a name:
-/// mono tuples also stand for structs and enums, whose names are gone.
-fn capture_types(captures: &Expression) -> Result<(Vec<PrintableType>, bool), InterpretError> {
-    let Type::Tuple(types) =
-        captures.return_type().as_deref().cloned().ok_or_else(|| {
-            InterpretError::Internal("fmt captures have no return type".to_string())
-        })?
-    else {
-        return Err(InterpretError::Internal(
-            "fmt captures do not have a tuple type".to_string(),
-        ));
-    };
-    let lossy = types.iter().any(loses_type_names);
-    Ok((types.iter().map(printable_type).collect(), lossy))
-}
-
-fn loses_type_names(typ: &Type) -> bool {
-    match typ {
-        Type::Tuple(_) => true,
-        Type::Array(_, element) | Type::Vector(element) | Type::Reference(element, _) => {
-            loses_type_names(element)
-        }
-        // A format string's second parameter is its captures, a tuple by construction.
-        Type::FmtString(_, captures) => match captures.as_ref() {
-            Type::Tuple(types) => types.iter().any(loses_type_names),
-            other => loses_type_names(other),
-        },
-        Type::Function(arguments, return_type, environment, _) => {
-            arguments.iter().any(loses_type_names)
-                || loses_type_names(return_type)
-                || loses_type_names(environment)
-        }
-        _ => false,
-    }
-}
-
-fn holds_lossy_str(value: &Value) -> bool {
-    match value {
-        Value::LossyStr(_) => true,
-        Value::Array(elements) => elements.iter().any(holds_lossy_str),
-        Value::Tuple(cells) => cells.iter().any(|cell| holds_lossy_str(&cell.borrow())),
-        Value::Ref(cell, _) => holds_lossy_str(&cell.borrow()),
-        Value::Field(_)
-        | Value::Int(_)
-        | Value::Bool(_)
-        | Value::Unit
-        | Value::Str(_)
-        | Value::Function(_) => false,
-    }
-}
-
-/// Storing a lossy string would let its wrong text be read back later.
-fn lossy_string_stored() -> InterpretError {
-    InterpretError::Unsupported(
-        "stored format string interpolating an aggregate with erased type metadata".to_string(),
-    )
-}
-
+/// The capture types of a format string's printable type: the captures are a tuple, or unit when
+/// there are none.
 fn printable_capture_types(typ: PrintableType) -> Option<Vec<PrintableType>> {
     match typ {
         PrintableType::Tuple { types } => Some(types),
@@ -971,46 +916,7 @@ fn printable_capture_types(typ: PrintableType) -> Option<Vec<PrintableType>> {
     }
 }
 
-fn printable_type(typ: &Type) -> PrintableType {
-    match typ {
-        Type::Field => PrintableType::Field,
-        Type::Array(length, element) => PrintableType::Array {
-            length: *length,
-            typ: Box::new(printable_type(element)),
-        },
-        Type::Integer(signedness, bits) if signedness.is_signed() => {
-            PrintableType::SignedInteger { width: *bits }
-        }
-        Type::Integer(_, bits) => PrintableType::UnsignedInteger { width: *bits },
-        Type::Bool => PrintableType::Boolean,
-        Type::String(length) => PrintableType::String { length: *length },
-        Type::FmtString(length, captures) => PrintableType::FmtString {
-            length: *length,
-            typ: Box::new(printable_type(captures)),
-        },
-        Type::Unit => PrintableType::Unit,
-        Type::Tuple(types) => PrintableType::Tuple {
-            types: types.iter().map(printable_type).collect(),
-        },
-        Type::Vector(element) => PrintableType::Vector {
-            typ: Box::new(printable_type(element)),
-        },
-        Type::Reference(element, mutable) => PrintableType::Reference {
-            typ: Box::new(printable_type(element)),
-            mutable: *mutable,
-        },
-        Type::Function(arguments, return_type, environment, unconstrained) => {
-            PrintableType::Function {
-                arguments: arguments.iter().map(printable_type).collect(),
-                return_type: Box::new(printable_type(return_type)),
-                env: Box::new(printable_type(environment)),
-                unconstrained: *unconstrained,
-            }
-        }
-    }
-}
-
-fn format_fmt_str(
+pub(super) fn format_fmt_str(
     fragments: &[FmtStrFragment],
     values: &[Value],
     types: &[PrintableType],
@@ -1056,10 +962,19 @@ fn format_value(value: &Value, typ: &PrintableType) -> Result<String, InterpretE
         (Value::Int(int), PrintableType::SignedInteger { .. })
         | (Value::Int(int), PrintableType::UnsignedInteger { .. }) => Ok(int.value.to_string()),
         (Value::Bool(value), PrintableType::Boolean) => Ok(value.to_string()),
+        (Value::Str(bytes), PrintableType::String { .. }) => {
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        }
         (
-            Value::Str(value) | Value::LossyStr(value),
-            PrintableType::String { .. } | PrintableType::FmtString { .. },
-        ) => Ok(value.clone()),
+            Value::FmtStr {
+                fragments,
+                captures,
+            },
+            PrintableType::FmtString { typ, .. },
+        ) => {
+            let types = printable_capture_types((**typ).clone()).ok_or_else(mismatch)?;
+            format_fmt_str(fragments, captures, &types)
+        }
         (Value::Unit, PrintableType::Unit) => Ok("()".to_string()),
         (Value::Array(values), PrintableType::Array { typ, .. }) => {
             format_sequence(values, typ, "[", "]")
@@ -1643,38 +1558,16 @@ mod aggregate_and_fmt_tests {
         assert_eq!(*index.borrow(), u32v(1));
     }
 
-    /// The shapes `renders_assert_message`'s end-to-end string does not already pin: a vector's
-    /// `@[..]` prefix and a negative signed integer.
-    #[test]
-    fn erased_aggregate_captures_format_lossily() {
-        let aggregate = Type::Tuple(vec![Type::Field]);
-        for typ in [
-            aggregate.clone(),
-            Type::Array(1, Rc::new(aggregate.clone())),
-            Type::Vector(Rc::new(aggregate)),
-        ] {
-            let captures = Expression::Tuple(vec![Expression::Ident(ident(
-                LocalId(0),
-                "capture",
-                typ,
-                0,
-            ))]);
-            assert!(capture_types(&captures).unwrap().1);
-        }
-        let captures = Expression::Tuple(vec![Expression::Ident(ident(
-            LocalId(0),
-            "capture",
-            Type::Field,
-            0,
-        ))]);
-        assert!(matches!(
-            capture_types(&captures).unwrap(),
-            (types, false) if types == [PrintableType::Field]
-        ));
-    }
-
     #[test]
     fn format_value_uses_noir_display_rules() {
+        assert_eq!(
+            format_value(
+                &Value::Str(vec![0x66, 0x6f, 0xFF, 0x6f]),
+                &PrintableType::String { length: 4 }
+            )
+            .unwrap(),
+            "fo\u{FFFD}o"
+        );
         let i32_type = PrintableType::SignedInteger { width: 32 };
         assert_eq!(format_value(&i32v(-7), &i32_type).unwrap(), "-7");
         assert_eq!(

@@ -164,14 +164,16 @@ fn rejects_inputs_from_another_field() {
         );
     }
 
-    // Noir refuses a reference as an entry-point type, so a `Ref` input is always a caller error
-    // and has no accepted spelling to check; the traversal still has to look inside one rather
-    // than take it for a leaf.
+    // Caller-built values must be checked even inside shapes the ABI cannot express.
     let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
     for hidden in [
         Value::Ref(cell(&bad), false),
         Value::Array(vec![Value::Ref(cell(&bad), false)]),
         Value::tuple(vec![Value::Ref(cell(&bad), true)]),
+        Value::FmtStr {
+            fragments: Vec::new(),
+            captures: vec![Value::tuple(vec![bad.clone()])],
+        },
     ] {
         match interpret_with_inputs(&validated.program, vec![hidden.clone()], field) {
             Err(InterpretError::InvalidInput(message)) => {
@@ -474,6 +476,14 @@ fn interprets_reference_call_chain() {
     );
 }
 
+#[test]
+fn interprets_field_projections_through_references() {
+    assert_eq!(
+        interpret_fixture("interp_refs_offset_receiver").unwrap(),
+        Value::Unit
+    );
+}
+
 /// An enum `match` binds a variant's payload via the `(tag, payload…)` tuple. `x = 3` → `3 * 4 == 12`.
 #[test]
 fn interprets_enum_match() {
@@ -545,33 +555,82 @@ fn renders_assert_message() {
 }
 
 #[test]
-fn stored_format_strings_reject_erased_type_names() {
+fn stored_format_strings_render_with_their_type_names() {
     let validated = compile_source(
-        "struct Pair { x: u32 } fn main(flag: bool) {
-         let p = Pair { x: 7 }; let message = f\"value: {p}\"; assert(flag, message); }",
+        "struct Pair { x: u32 }
+         struct Wrap { p: Pair, tag: bool }
+         fn main(which: u32) {
+             let p = Pair { x: 7 };
+             let message = f\"value: {p}\";
+             println(message);
+             let messages = [f\"a: {p}\", f\"b: {p}\"];
+             let w = Wrap { p, tag: true };
+             let picked = if which == 3 { f\"x {w}\" } else { f\"y {w}\" };
+             let tuple = (f\"t0 {p}\", 5);
+             assert(which != 0, message);
+             assert(which != 1, messages[1]);
+             assert((which != 2) & (which != 3), picked);
+             assert(which != 4, tuple.0);
+             let s = \"plain\";
+             assert(which != 5, f\"nested str {s}\");
+             let holder = (p, 1);
+             assert(which != 6, f\"held {holder}\");
+             let mut changing = Pair { x: 7 };
+             let snapshot = f\"saved {changing}\";
+             changing.x = 9;
+             assert(changing.x == 9);
+             assert(which != 7, snapshot);
+             let mut reassigned = f\"old {p}\";
+             let q = changing;
+             reassigned = f\"new {q}\";
+             assert(which != 8, reassigned);
+             let empty = f\"no captures\";
+             assert(which != 9, empty);
+             if which == 10 {
+                 std::static_assert(false, f\"static {p}\");
+             }
+             if which == 11 {
+                 let x: u32 = 7;
+                 std::static_assert(false, f\"x={x}\");
+             }
+             if which == 12 {
+                 std::static_assert(false, f\"no captures\");
+             }
+             if which == 13 {
+                 std::static_assert(false, f\"outer {message}\");
+             }
+         }",
         FieldId::linked(),
     );
-    let result = interpret_with_inputs(
-        &validated.program,
-        vec![Value::Bool(false)],
-        validated.field_id,
-    );
-    assert!(
-        matches!(result, Err(InterpretError::Unsupported(ref message)) if message.contains("erased type metadata")),
-        "{result:?}"
-    );
-}
-
-/// A struct in a format string loses its name in the mono AST; that is fine on the way to
-/// `print`, whose text is dropped.
-#[test]
-fn printed_format_strings_may_interpolate_erased_aggregates() {
-    let validated = compile_source(
-        "struct Pair { x: u32 } fn main() { let p = Pair { x: 7 }; println(f\"value: {p}\"); }",
-        FieldId::linked(),
-    );
+    for (which, expected) in [
+        (0, "value: Pair { x: 7 }"),
+        (1, "b: Pair { x: 7 }"),
+        (2, "y Wrap { p: Pair { x: 7 }, tag: true }"),
+        (3, "x Wrap { p: Pair { x: 7 }, tag: true }"),
+        (4, "t0 Pair { x: 7 }"),
+        (5, "nested str plain"),
+        (6, "held (Pair { x: 7 }, 0x01)"),
+        (7, "saved Pair { x: 7 }"),
+        (8, "new Pair { x: 9 }"),
+        (9, "no captures"),
+        (10, "static Pair { x: 7 }"),
+        (11, "x=7"),
+        (12, "no captures"),
+        (13, "outer value: Pair { x: 7 }"),
+    ] {
+        let input = Value::Int(IntValue::canonical(false, 32, BigInt::from(which)));
+        let result = interpret_with_inputs(&validated.program, vec![input], validated.field_id);
+        match result {
+            Err(InterpretError::AssertionFailed {
+                message: Some(message),
+                ..
+            }) => assert_eq!(message, expected, "which = {which}"),
+            other => panic!("which = {which}: {other:?}"),
+        }
+    }
+    let input = Value::Int(IntValue::canonical(false, 32, BigInt::from(14)));
     assert_eq!(
-        interpret(&validated.program, validated.field_id).unwrap(),
+        interpret_with_inputs(&validated.program, vec![input], validated.field_id).unwrap(),
         Value::Unit
     );
 }
@@ -677,33 +736,68 @@ fn validates_goldilocks_mono_ast_u64() {
 }
 
 #[test]
-fn interprets_wide_integers() {
-    for bits in [34u32, 36, 66, 126, 128] {
+fn interprets_integer_widths() {
+    for (bits, returned) in [
+        (2u32, 3),
+        (10, 16),
+        (33, 16),
+        (34, 16),
+        (36, 16),
+        (66, 16),
+        (126, 16),
+        (128, 16),
+        (16384, 16),
+    ] {
         assert_fixture_return(
             &format!("interp_width_{bits}"),
-            Value::Int(IntValue::canonical(false, bits, BigInt::from(16))),
+            Value::Int(IntValue::canonical(false, bits, BigInt::from(returned))),
         );
     }
 }
 
 #[test]
 fn rejects_invalid_integer_widths() {
-    for (name, needle) in [
-        ("width_odd", "`u33` is not a supported integer type"),
-        ("width_gap", "`u10` is not a supported integer type"),
+    const RULE: &str = "integer widths are every width from 2 to 16384";
+    for (name, messages, note) in [
         (
             "width_above_max",
-            "`u65538` is not a supported integer type",
+            &["`u16385` is not a supported integer type"][..],
+            RULE,
         ),
-        ("width_unresolved", "Could not resolve 'N' in path"),
+        (
+            "width_zero",
+            &["`u0` is not a supported integer type"][..],
+            RULE,
+        ),
+        (
+            "width_one",
+            &[
+                "`u1` is not a supported integer type",
+                "`i1` is not a supported integer type",
+            ][..],
+            "`u1` has been removed, use `bool` instead",
+        ),
+        (
+            "width_unresolved",
+            &["Could not resolve 'N' in path"][..],
+            "",
+        ),
     ] {
         let project = NoirProject::new(negative_fixture(name)).expect("project");
         let error = match compile_for_validation(&project, FieldId::linked()) {
             Ok(_) => panic!("{name}: validation accepted an invalid width"),
             Err(error) => error,
         };
+        for message in messages {
+            assert!(
+                error.summary().contains(message),
+                "{name}: {}",
+                error.summary()
+            );
+        }
+        assert!(error.detail().contains(note), "{name}: {}", error.detail());
         assert!(
-            error.summary().contains(needle),
+            !error.summary().contains("Could not resolve 'u"),
             "{name}: {}",
             error.summary()
         );
@@ -720,6 +814,19 @@ fn interprets_stdlib_fixtures() {
         ("interp_hash_limbs", Value::Bool(false)),
         ("interp_field_lt", Value::Bool(true)),
         ("interp_derive_eq_hash", Value::Bool(false)),
+        (
+            "interp_refcount_constrained",
+            Value::Int(IntValue::canonical(false, 32, BigInt::from(0))),
+        ),
+        (
+            "interp_str_bytes",
+            Value::Array(
+                [0x41u8, 0xFF, 0x42]
+                    .into_iter()
+                    .map(|byte| Value::Int(IntValue::canonical(false, 8, BigInt::from(byte))))
+                    .collect(),
+            ),
+        ),
     ] {
         assert_fixture_return(name, expected);
     }
@@ -1012,6 +1119,9 @@ fn oracle_matches_interpreter_smoke() {
         "interp_refs_call_chain",
         "interp_refs_nested_field",
         "interp_refs_double_deref_alias",
+        "interp_refs_offset_receiver",
+        "interp_refcount_constrained",
+        "interp_str_bytes",
         "interp_match_enum",
         "interp_match_int",
         "intrinsic_slice_ops",

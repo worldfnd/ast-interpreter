@@ -13,7 +13,9 @@ use crate::error::InterpretError;
 use crate::eval::eval_int_binary;
 use crate::value::{IntValue, Value, wrap};
 
-const WIDTHS: &[u32] = &[8, 16, 32, 34, 36, 64, 66, 126, 128, 256, 65536];
+const WIDTHS: &[u32] = &[
+    2, 3, 8, 10, 16, 32, 33, 34, 36, 64, 66, 126, 128, 256, 16384,
+];
 
 fn width() -> impl Strategy<Value = u32> {
     proptest::sample::select(WIDTHS)
@@ -106,7 +108,7 @@ proptest! {
         prop_assert_eq!(&back.value, &v.value);
         prop_assert_eq!(flip.unsigned_repr(), v.unsigned_repr());
 
-        // (b) widen to the next larger width (genuine widening below the 65536-bit max), then
+        // (b) widen to the next larger width (genuine widening below the 16384-bit max), then
         // narrow back.
         let bits2 = wider_than(bits);
         let wide = IntValue::canonical(signed, bits2, v.value.clone());
@@ -115,7 +117,8 @@ proptest! {
         prop_assert_eq!(&narrow.value, &v.value);
     }
 
-    /// Shifting by `amount >= bits` overflows in both directions.
+    /// Shifting by `amount >= bits` overflows in both directions. The amount is a value of the
+    /// shifted type, so at the narrowest widths it can exceed `bits` by only a little.
     #[test]
     fn p3a_over_shift_errors(
         bits in width(),
@@ -124,7 +127,9 @@ proptest! {
     ) {
         let raw = if neg { -BigInt::from(mag) } else { BigInt::from(mag) };
         let a = IntValue::canonical(false, bits, raw);
-        let amount = IntValue::canonical(false, bits, BigInt::from(bits + extra));
+        let max_extra = if bits < 8 { (1u32 << bits) - 1 - bits } else { 64 };
+        let amount = IntValue::canonical(false, bits, BigInt::from(bits + extra % (max_extra + 1)));
+        prop_assert!(amount.value >= BigInt::from(bits));
 
         let shl = eval_int_binary(BinaryOpKind::ShiftLeft, a.clone(), amount.clone());
         let shr = eval_int_binary(BinaryOpKind::ShiftRight, a, amount);

@@ -74,5 +74,5 @@ requires both.
 standard library through the interpreter; one it cannot run fails it, except bn254's own crypto
 when `bn254-crypto` is off.
 `tests::oracle_survey_execution_success` separately compares the interpreter with Noir's executor;
-its doc comment has the command. Unsupported intrinsics, including `array_refcount` and
-`vector_refcount`, remain explicit coverage gaps.
+its doc comment has the command. Unsupported intrinsics, such as a reference count taken in
+unconstrained code, remain explicit coverage gaps.
