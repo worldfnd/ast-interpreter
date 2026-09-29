@@ -4,18 +4,21 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::corpus::{
-    compile_error_of, copy_dir, corpus_dir, list_programs, panic_message, temp_noir_package,
+    compile_error_of, copy_dir, corpus_dir, list_programs, noir_checkout, panic_message,
+    temp_noir_package,
 };
 use super::diff::{FailureKind, comparable_error_of};
 use super::expected_return_from_prover_toml;
 use super::loader::NoirProject;
-use super::validation_frontend::{Validated, compile_for_validation, stdlib_tests};
+use super::validation_frontend::{
+    Validated, compile_for_validation, compile_for_validation_with, stdlib_tests,
+};
 use super::{
     IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
 };
 use acvm::{FieldConfig, FieldId, FieldValue};
 use noirc_frontend::token::TestScope;
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
 
 /// A test Noir package under `fixtures/`. Positive packages keep a plain name; negatives carry a
 /// `neg_` prefix (built via [`negative_fixture`]).
@@ -58,9 +61,14 @@ fn assert_fixture_return_under(field: FieldId, name: &str, expected: Value) {
 
 /// The fixture's return under `field` from its `Prover.toml` inputs, and the return it records.
 fn run_fixture(field: FieldId, name: &str) -> (Value, Option<Value>) {
+    run_fixture_with(field, name, false)
+}
+
+/// [`run_fixture`] with Noir's benchmark mode chosen.
+fn run_fixture_with(field: FieldId, name: &str, generic_builtins: bool) -> (Value, Option<Value>) {
     let root = fixture(name);
     let project = NoirProject::new(root.clone()).expect("project");
-    let validated = compile_for_validation(&project, field)
+    let validated = compile_for_validation_with(&project, field, generic_builtins)
         .unwrap_or_else(|error| panic!("{name}: {field}: frontend: {error}"));
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
     let inputs = inputs_from_prover_toml(
@@ -435,7 +443,7 @@ fn goldilocks_refuses_an_entry_point_integer_that_can_reach_its_modulus() {
     for name in [
         "interp_inputs_i64",
         "interp_return_i64",
-        "neg_wide_input_u66",
+        "neg_wide_input_u128",
     ] {
         let project = NoirProject::new(fixture(name)).expect("project");
         assert!(
@@ -451,6 +459,13 @@ fn goldilocks_refuses_an_entry_point_integer_that_can_reach_its_modulus() {
                 .to_string()
                 .contains("Invalid type found in the entry point to a program"),
             "{name}: {error}"
+        );
+        assert!(
+            error
+                .detail()
+                .contains("bits are not valid entry point types under goldilocks"),
+            "{name}: refused by the lowerable rule rather than the modulus one: {}",
+            error.detail()
         );
     }
 }
@@ -681,14 +696,11 @@ fn interprets_integer_widths() {
         (128, 16),
         (16384, 16),
     ] {
-        let returned_width = if bits > 63 { 8 } else { bits };
+        // Every width fixture takes `u8` inputs and returns a `u8`: an entry point carries only
+        // the lowerable integer types, so the width under test lives in a helper.
         assert_fixture_return(
             &format!("interp_width_{bits}"),
-            Value::Int(IntValue::canonical(
-                false,
-                returned_width,
-                BigInt::from(returned),
-            )),
+            Value::Int(IntValue::canonical(false, 8, BigInt::from(returned))),
         );
     }
 }
@@ -774,9 +786,109 @@ fn interprets_stdlib_fixtures() {
 fn bn254_accepts_input_above_the_goldilocks_modulus() {
     assert_fixture_return_under(
         FieldId::Bn254,
-        "neg_wide_input_u66",
-        Value::Int(IntValue::canonical(false, 66, BigInt::from(1u8) << 65usize)),
+        "neg_wide_input_u128",
+        Value::Int(IntValue::canonical(
+            false,
+            128,
+            BigInt::from(1u8) << 65usize,
+        )),
     );
+}
+
+/// Noir's benchmark mode compiles the field-generic twins of `Field::lt` and the wrapping ops on
+/// bn254; they compute the same values as the bn254 halves, which `interprets_stdlib_fixtures`
+/// pins.
+#[test]
+fn generic_builtins_keep_the_values_of_lt_and_wrapping_ops_on_bn254() {
+    for (name, expected) in [
+        ("interp_field_lt", Value::Bool(true)),
+        (
+            "interp_wrapping_ops",
+            Value::Int(IntValue::canonical(false, 32, BigInt::from(7))),
+        ),
+    ] {
+        let (result, _) = run_fixture_with(FieldId::Bn254, name, true);
+        assert_eq!(result, expected, "{name}");
+    }
+}
+
+/// The benchmark mode really selects the generic half: `Hash for u64` writes one element under
+/// bn254 and two 32-bit limbs in its field-generic twin, which the recorder tells apart. The
+/// mode acts on bn254 only, so Goldilocks hashes the limbs with or without it.
+#[test]
+fn generic_builtins_select_the_limb_hash_on_bn254() {
+    // `Recorder::write` in the fixture folds each write as `state * MULTIPLIER + input`.
+    const MULTIPLIER: u64 = 0x1_0000_0001_b3;
+    // `main` hashes `x + 2^32` with `Prover.toml`'s `x = 7`.
+    let wide: u64 = 7 + (1 << 32);
+    let hash_under = |field: FieldId, generic_builtins: bool| {
+        let (value, recorded) = run_fixture_with(field, "interp_generic_twins", generic_builtins);
+        let Value::Field(element) = &value else {
+            panic!("{value:?}")
+        };
+        let element = element.as_biguint().clone();
+        (element, recorded == Some(value))
+    };
+    let (one_write, recorded_agrees) = hash_under(FieldId::Bn254, false);
+    assert_eq!(one_write, BigUint::from(wide));
+    assert!(recorded_agrees, "Prover.toml records bn254's one write");
+    // The low limb first, then the high limb.
+    let limbs = BigUint::from((wide & 0xffff_ffff) * MULTIPLIER + (wide >> 32));
+    assert_eq!(hash_under(FieldId::Bn254, true).0, limbs);
+    assert_eq!(hash_under(FieldId::Goldilocks, false).0, limbs);
+    assert_eq!(hash_under(FieldId::Goldilocks, true).0, limbs);
+}
+
+/// Unbounded recursion fails the program the way Noir's executor does, with `Stack too deep`,
+/// instead of exhausting the interpreter's own stack: direct, mutual, through a lambda, and
+/// through unconstrained entry points that share a callee.
+#[test]
+fn unbounded_recursion_is_a_stack_too_deep_assertion() {
+    for name in [
+        "simple_infinite_recursive_function",
+        "simple_infinite_recursive_lambda",
+        "mutually_recursive_simple_functions",
+        "brillig_entry_points_shared_recursive",
+    ] {
+        let root = noir_checkout()
+            .join("test_programs/execution_failure")
+            .join(name);
+        let project = NoirProject::new(root).expect("project");
+        let validated = compile_for_validation(&project, FieldId::Bn254)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let error = interpret(&validated.program, validated.field_id).expect_err(name);
+        assert!(
+            matches!(&error, InterpretError::AssertionFailed { message: Some(m), .. } if m == "Stack too deep"),
+            "{name}: {error}"
+        );
+    }
+}
+
+/// An entry point carries only the integer types the circuit backend lowers, under every field:
+/// `u24` is legal inside a program and refused on `main`.
+#[test]
+fn the_entry_point_takes_only_lowerable_integer_types() {
+    let project = NoirProject::new(negative_fixture("entry_width_u24")).expect("project");
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let error = match compile_for_validation(&project, field) {
+            Ok(_) => panic!("{field}: a u24 entry point must not compile"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .summary()
+                .contains("Invalid type found in the entry point to a program"),
+            "{field}: {}",
+            error.summary()
+        );
+        assert!(
+            error.detail().contains(
+                "Integers the circuit backend does not lower are not valid entry point types. Found: u24"
+            ),
+            "{field}: {}",
+            error.detail()
+        );
+    }
 }
 
 // --- Differential oracle: interpreter vs Noir's own ACVM/Brillig executor (see `noir_oracle.rs`).
@@ -1040,6 +1152,7 @@ fn oracle_matches_interpreter_smoke() {
     // cannot judge it (the interpreter still runs it — see `interprets_prover_toml_inputs`).
     for name in [
         "interp_basic",
+        "interp_generic_twins",
         "interp_inputs_u64",
         "interp_inputs_i32",
         "interp_inputs_i64",
@@ -1128,65 +1241,4 @@ fn oracle_survey_execution_success() {
         "{} interpreter/executor failure(s) found",
         failures.len()
     );
-}
-
-// Parked behind an always-false cfg until the mavros-compiler dependency is available; restore
-// `#[cfg(feature = "mavros-oracle")]` then.
-#[cfg(any())]
-mod mavros_oracle {
-    use super::{
-        NoirProject, Value, compile_for_validation, fixture, inputs_from_prover_toml, interpret,
-        interpret_with_inputs,
-    };
-    use acvm::FieldId;
-    use mavros_compiler::{driver::Driver, project::Project};
-
-    /// The integration driver and the pure-Noir frontend should agree on a stdlib-free fixture.
-    #[test]
-    fn integration_driver_agrees_with_pure_noir() {
-        let root = fixture("interp_inputs_u64");
-        let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-
-        // pure-Noir side
-        let noir = NoirProject::new(root.clone()).expect("noir project");
-        let validated =
-            compile_for_validation(&noir, FieldId::linked()).expect("pure-noir frontend");
-        let noir_inputs = inputs_from_prover_toml(
-            &validated.program,
-            &validated.abi,
-            &toml,
-            validated.field_id,
-        )
-        .expect("noir inputs");
-        let noir_result =
-            interpret_with_inputs(&validated.program, noir_inputs, validated.field_id)
-                .expect("noir interpret");
-
-        // Integration side.
-        let project = Project::new(root.clone()).expect("oracle project");
-        let mut driver = Driver::new(project, false);
-        driver.run_noir_compiler().expect("oracle compile");
-        let oracle_program = driver.monomorphized_program();
-        // The driver compiles for the field it is linked against.
-        let oracle_inputs =
-            inputs_from_prover_toml(oracle_program, driver.abi(), &toml, FieldId::linked())
-                .expect("oracle inputs");
-        let oracle_result = interpret_with_inputs(oracle_program, oracle_inputs, FieldId::linked())
-            .expect("oracle interpret");
-
-        assert_eq!(
-            noir_result, oracle_result,
-            "integration AST must interpret identically to pure-Noir"
-        );
-    }
-
-    /// Exercises the `PackageSource` impl used by the optional oracle.
-    #[test]
-    fn compile_for_validation_accepts_oracle_project() {
-        let project = Project::new(fixture("interp_basic")).expect("oracle project");
-        let validated =
-            compile_for_validation(&project, FieldId::linked()).expect("validate oracle project");
-        let result = interpret(&validated.program, validated.field_id).expect("interpret");
-        assert_eq!(result, Value::Unit);
-    }
 }
