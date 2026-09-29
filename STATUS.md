@@ -4,7 +4,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 
 | provenance | value |
 | --- | --- |
-| noir_rev | 6a1e938795ed3bf14866617b4a18d465fb6db9d9 |
+| noir_rev | d99f150fbf3ca40924e016de33219530b0d5ec6b |
 | corpus_hash | 3ad62c2ccd6466555cdc14ba75992a0fdbb31beb14fec9fc46f62680576ebc7a |
 | programs | 509 corpus, 48 fixtures |
 | toolchain | rustc 1.89.0 (29483883e 2025-08-04) |
