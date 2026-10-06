@@ -53,11 +53,6 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         &[Capability::UnsignedFits(64)],
     ),
     ("cast_regression_7776", &[Capability::UnsignedFits(64)]),
-    ("fold_2_to_17", &[Capability::FieldBitsAtLeast(254)]),
-    (
-        "fold_numeric_generic_poseidon",
-        &[Capability::FieldBitsAtLeast(254)],
-    ),
     (
         "lambda_taking_lambda_regression_8543",
         &[Capability::SignedFits(64)],
@@ -249,7 +244,6 @@ const PROJECTION_INVARIANT_FIXTURES: &[&str] = &[
     "interp_inputs_mixed",
     "interp_refs_call_chain",
     "interp_refs_offset_receiver",
-    "interp_refcount_constrained",
     "interp_str_bytes",
     "interp_match_enum",
     "interp_match_int",
