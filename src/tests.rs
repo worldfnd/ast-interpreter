@@ -835,11 +835,9 @@ fn generic_builtins_select_the_limb_hash_on_bn254() {
     assert_eq!(hash_under(FieldId::Goldilocks, true).0, limbs);
 }
 
-/// Unbounded recursion fails the program the way Noir's executor does, with `Stack too deep`,
-/// instead of exhausting the interpreter's own stack: direct, mutual, through a lambda, and
-/// through unconstrained entry points that share a callee.
+/// Direct, mutual and lambda recursion stop at the interpreter's host-stack limit.
 #[test]
-fn unbounded_recursion_is_a_stack_too_deep_assertion() {
+fn unbounded_recursion_is_a_coverage_gap() {
     for name in [
         "simple_infinite_recursive_function",
         "simple_infinite_recursive_lambda",
@@ -854,10 +852,43 @@ fn unbounded_recursion_is_a_stack_too_deep_assertion() {
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         let error = interpret(&validated.program, validated.field_id).expect_err(name);
         assert!(
-            matches!(&error, InterpretError::AssertionFailed { message: Some(m), .. } if m == "Stack too deep"),
+            matches!(&error, InterpretError::Unsupported(m) if m == "call depth exceeds 256"),
             "{name}: {error}"
         );
     }
+}
+
+#[test]
+fn finite_recursion_at_the_call_limit_is_a_coverage_gap() {
+    let root = temp_noir_package(
+        "finite_recursion",
+        "unconstrained fn recurse(n: u32) -> u32 {
+            if n == 0 { 0 } else { recurse(n - 1) + 1 }
+        }
+        fn main(n: u32) -> pub u32 { unsafe { recurse(n) } }",
+    );
+    let project = NoirProject::new(root.path().to_path_buf()).expect("project");
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_for_validation(&project, field).expect("frontend");
+        let input = |n| Value::Int(IntValue::canonical(false, 32, BigInt::from(n)));
+        // `main` and the terminating `recurse(0)` each consume one frame.
+        let below = super::MAX_CALL_DEPTH as u32 - 2;
+        assert_eq!(
+            interpret_with_inputs(&validated.program, vec![input(below)], field).unwrap(),
+            input(below)
+        );
+        assert!(matches!(
+            interpret_with_inputs(&validated.program, vec![input(below + 1)], field),
+            Err(InterpretError::Unsupported(_))
+        ));
+    }
+    assert_eq!(
+        super::noir_oracle::noir_execute_return(&project, Some("n = \"255\""))
+            .expect("Noir executes recursion beyond the interpreter's limit"),
+        Some(noirc_abi::input_parser::InputValue::Field(
+            acvm::FieldElement::from(255u128)
+        ))
+    );
 }
 
 /// An entry point carries only the integer types the circuit backend lowers, under every field:

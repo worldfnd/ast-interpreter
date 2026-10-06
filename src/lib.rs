@@ -49,7 +49,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use acvm::{FieldConfig, FieldId};
-use noirc_errors::Location;
 use noirc_frontend::monomorphization::ast::{FuncId, Function, GlobalId, LocalId, Program};
 
 /// Per-call-frame local environment: each `LocalId` is unique within a monomorphized function.
@@ -79,11 +78,8 @@ pub(crate) struct Interpreter<'p> {
     call_depth: usize,
 }
 
-/// The deepest nesting of calls the interpreter runs. Noir's Brillig VM ends a runaway recursion
-/// with the assertion `Stack too deep` once its stack memory is spent (`check_max_stack_depth`
-/// in `noirc_evaluator`); the interpreter raises the same assertion at this depth, so an
-/// unbounded recursion fails the program rather than the process. No corpus program nests
-/// calls 50 deep, and the bound keeps the heaviest frames inside the test threads' stack.
+/// Bound the host stack. Reaching this limit is an interpreter coverage gap, since Noir can
+/// execute deeper finite recursion and its stack limit depends on the compiled frames.
 const MAX_CALL_DEPTH: usize = 256;
 
 /// Interpret `program`'s entry point with no inputs (for self-checking programs whose `main`
@@ -115,8 +111,7 @@ pub fn interpret_with_inputs(
         )));
     }
     input::validate_inputs(&inputs, field)?;
-    // The entry call has no call site of its own.
-    interp.call_function(main.id, inputs, Location::dummy())
+    interp.call_function(main.id, inputs)
 }
 
 pub(crate) fn function_of(program: &Program, id: FuncId) -> Result<&Function, InterpretError> {
@@ -147,19 +142,11 @@ impl<'p> Interpreter<'p> {
         function_of(self.program, id)
     }
 
-    /// Call `id` with `args`; `location` is the call's, for the diagnostics of a call that
-    /// cannot go ahead.
-    fn call_function(
-        &mut self,
-        id: FuncId,
-        args: Vec<Value>,
-        location: Location,
-    ) -> Result<Value, InterpretError> {
+    fn call_function(&mut self, id: FuncId, args: Vec<Value>) -> Result<Value, InterpretError> {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(InterpretError::AssertionFailed {
-                location,
-                message: Some("Stack too deep".to_string()),
-            });
+            return Err(InterpretError::Unsupported(format!(
+                "call depth exceeds {MAX_CALL_DEPTH}"
+            )));
         }
         let func = self.function(id)?;
         if func.parameters.len() != args.len() {
