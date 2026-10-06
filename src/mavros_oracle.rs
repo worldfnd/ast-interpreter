@@ -366,8 +366,9 @@ fn examine(
 fn verdict(record: &Record) -> String {
     let interp_ok = record.interp == "ok";
     let interp_gap = record.interp.starts_with("Unsupported");
-    let interp_internal =
-        record.interp.starts_with("Internal") || record.interp.starts_with("Panic");
+    let interp_internal = ["Internal", "Panic", "Type"]
+        .iter()
+        .any(|prefix| record.interp.starts_with(prefix));
     let compile = record.mavros_compile.as_str();
     let mavros_gap = [
         "panic",
@@ -379,13 +380,20 @@ fn verdict(record: &Record) -> String {
     ]
     .iter()
     .any(|prefix| compile.starts_with(prefix))
-        || record.witgen_unchecked.starts_with("panic");
-    let mavros_rejects =
-        compile.starts_with("reject") || (compile == "ok" && record.witgen_unchecked != "ok");
+        || ["panic:", "params:", "inputs:", "guard:"]
+            .iter()
+            .any(|prefix| record.witgen_unchecked.starts_with(prefix));
+    let mavros_rejects = compile.starts_with("reject")
+        || (compile == "ok"
+            && (record.witgen_unchecked == "unsat"
+                || record.witgen_unchecked.starts_with("trap:")));
     let mavros_accepts = compile == "ok" && record.witgen_unchecked == "ok";
 
     if compile.starts_with("frontend-reject") {
         return "frontend-reject".into();
+    }
+    if record.interp.starts_with("InputError") {
+        return "input-error".into();
     }
     if mavros_gap {
         return if interp_gap || interp_internal {
@@ -424,7 +432,10 @@ fn verdict(record: &Record) -> String {
     match record.witgen_declared.as_str() {
         "ok" | "no-return" => "agree".into(),
         declared if declared.starts_with("unencodable") => "unencodable-return".into(),
-        _ => "RETURN-MISMATCH".into(),
+        declared if declared == "unsat" || declared.starts_with("trap:") => {
+            "RETURN-MISMATCH".into()
+        }
+        _ => "mavros-gap".into(),
     }
 }
 
@@ -554,14 +565,17 @@ fn run_job(job: &Job, field: FieldId, generic_builtins: bool, timeout: Duration)
         .expect("spawn child");
     let stdout = child.stdout.take().unwrap();
     let reader = std::thread::spawn(move || {
-        BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-            .find_map(|l| {
-                // libtest writes `test <name> ... ` on the line the record starts on.
-                l.find(RECORD_PREFIX)
-                    .map(|at| l[at + RECORD_PREFIX.len()..].to_string())
-            })
+        let mut record = None;
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            // libtest writes `test <name> ... ` on the line the record starts on.
+            if record.is_none() {
+                record = line
+                    .find(RECORD_PREFIX)
+                    .map(|at| line[at + RECORD_PREFIX.len()..].to_string());
+            }
+            // Drain libtest's trailing output so closing the pipe cannot fail the child.
+        }
+        record
     });
     let start = Instant::now();
     let status = loop {
@@ -577,8 +591,10 @@ fn run_job(job: &Job, field: FieldId, generic_builtins: bool, timeout: Duration)
     };
     let line = reader.join().ok().flatten();
     match (line, status) {
-        (Some(json), _) => serde_json::from_str(&json).expect("record parses"),
-        (None, status) => {
+        (Some(json), Some(status)) if status.success() => {
+            serde_json::from_str(&json).expect("record parses")
+        }
+        (_, status) => {
             let mut record = Record::new(job.name.clone(), job.expect_failure);
             record.verdict = match status {
                 None => format!("timeout after {}s", timeout.as_secs()),
@@ -711,6 +727,12 @@ fn sweep() {
 /// can take reads back as the value it declared, struct fields in declaration order.
 #[test]
 fn a_declared_return_reads_back_through_the_input_bridge() {
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        assert_declared_return_round_trip(field);
+    }
+}
+
+fn assert_declared_return_round_trip(field: FieldId) {
     use super::IntValue;
     use super::input::value_from_input;
     use acvm::FieldValue;
@@ -720,7 +742,6 @@ fn a_declared_return_reads_back_through_the_input_bridge() {
     use num_bigint::BigInt;
     use std::rc::Rc;
 
-    let field = FieldId::Bn254;
     let config = FieldConfig::new(field);
     let u8_value = |v: u8| Value::Int(IntValue::canonical(false, 8, BigInt::from(v)));
     let u8_abi = AbiType::Integer {
@@ -805,14 +826,7 @@ fn every_verdict_bucket_is_reached_from_its_record() {
     for (expected, expect_failure, interp, compile, unchecked, declared) in [
         ("agree", false, "ok", "ok", "ok", "ok"),
         ("agree", false, "ok", "ok", "ok", "no-return"),
-        (
-            "RETURN-MISMATCH",
-            false,
-            "ok",
-            "ok",
-            "ok",
-            "guard: return differs",
-        ),
+        ("RETURN-MISMATCH", false, "ok", "ok", "ok", "unsat"),
         (
             "unencodable-return",
             false,
@@ -856,6 +870,24 @@ fn every_verdict_bucket_is_reached_from_its_record() {
             "not-run",
         ),
         ("interp-internal", false, "Panic: x", "ok", "ok", "not-run"),
+        (
+            "interp-internal",
+            true,
+            "TypeError: x",
+            "ok",
+            "unsat",
+            "not-run",
+        ),
+        (
+            "input-error",
+            true,
+            "InputError: x",
+            "ok",
+            "params: x",
+            "not-run",
+        ),
+        ("mavros-gap", false, "ok", "ok", "ok", "panic: x"),
+        ("mavros-gap", false, "ok", "ok", "ok", "guard: x"),
         ("mavros-gap", false, "ok", "panic: x", "not-run", "not-run"),
         (
             "mavros-gap",
@@ -945,6 +977,18 @@ fn every_verdict_bucket_is_reached_from_its_record() {
         let record = record(expect_failure, interp, compile, unchecked, declared);
         assert_eq!(verdict(&record), expected, "{record:?}");
     }
+    for expect_failure in [false, true] {
+        for setup_error in ["params: x", "inputs: x", "guard: x"] {
+            let record = record(
+                expect_failure,
+                "AssertionFailed: x",
+                "ok",
+                setup_error,
+                "not-run",
+            );
+            assert_eq!(verdict(&record), "mavros-gap", "{record:?}");
+        }
+    }
 }
 
 /// The interpreter's return for the package at `root`, through the pure-Noir frontend.
@@ -1021,32 +1065,28 @@ fn the_benchmark_mode_reaches_mavros() {
 fn a_failing_program_is_agreed_on_only_in_the_failure_corpus() {
     let tmp = tempfile::tempdir().unwrap();
     let root = fixture_copy(&tmp, "neg_assert_fail");
-    let as_failure = examine(&root, "neg_assert_fail".into(), true, FieldId::Bn254, false);
+    let mut as_failure = examine(&root, "neg_assert_fail".into(), true, FieldId::Bn254, false);
     assert!(
         as_failure.interp.starts_with("AssertionFailed"),
         "{as_failure:?}"
     );
     assert_eq!(verdict(&as_failure), "agree-reject", "{as_failure:?}");
 
-    let as_success = examine(
-        &root,
-        "neg_assert_fail".into(),
-        false,
-        FieldId::Bn254,
-        false,
-    );
-    assert_eq!(verdict(&as_success), "both-reject", "{as_success:?}");
+    as_failure.expect_failure = false;
+    assert_eq!(verdict(&as_failure), "both-reject", "{as_failure:?}");
 }
 
-/// A child past its budget is killed and recorded as a timeout, not as any agreement.
+/// A child must finish successfully to report agreement; one past its budget reports a timeout.
 #[test]
-fn a_child_past_its_budget_is_a_timeout_record() {
+fn a_child_reports_agreement_or_times_out() {
     let tmp = tempfile::tempdir().unwrap();
     let job = Job {
         dir: fixture_copy(&tmp, "interp_basic"),
         name: "interp_basic".into(),
         expect_failure: false,
     };
+    let record = run_job(&job, FieldId::Bn254, false, Duration::from_secs(60));
+    assert_eq!(record.verdict, "agree", "{record:?}");
     let record = run_job(&job, FieldId::Bn254, false, Duration::ZERO);
     assert_eq!(record.verdict, "timeout after 0s");
     assert_eq!(record.mavros_compile, record.verdict);
