@@ -20,12 +20,8 @@ serde = { workspace = true }
 serde_json = { version = "1.0" }
 sha2 = "0.10"
 
-# Optional integration oracle against a Mavros checkout whose Noir crates are pinned to the same
-# revision as the ones above, so both halves share one `FieldElement` and one monomorphized AST.
-# The line stays commented out because Cargo loads a path dependency's manifest even when its
-# feature is off, and CI has no Mavros checkout. To run the oracle, un-comment it, make the
-# `mavros-oracle` feature forward to it, and patch `worldfnd/noir` to the checkout Mavros builds
-# against; `src/mavros_oracle.rs` spells the steps out.
+# Mavros oracle, commented out because Cargo reads a path dependency's manifest even with its
+# feature off and CI has no Mavros checkout. `src/mavros_oracle.rs` has the steps to enable it.
 # mavros-compiler = { path = "../mavros/compiler", optional = true }
 
 [dev-dependencies]
@@ -46,8 +42,7 @@ default = ["bn254-crypto"]
 # Route the embedded-curve, Pedersen-generator and Poseidon2 built-ins to `bn254_blackbox_solver`.
 bn254-crypto = ["dep:bn254_blackbox_solver"]
 
-# Integration oracle against the Mavros compiler. Builds only once the `mavros-compiler` dependency
-# above is un-commented, and then reads ["dep:mavros-compiler"].
+# Becomes ["dep:mavros-compiler"] once that dependency is un-commented.
 mavros-oracle = []
 
 [lints]

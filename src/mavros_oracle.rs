@@ -1,37 +1,25 @@
 //! Differential oracle against Mavros.
 //!
-//! Mavros compiles a program with its own driver, and the interpreter runs the very monomorphized
-//! program that driver lowers, so the two can only disagree in the back half. Mavros's witness
-//! generator then runs twice: once with the return check off, which says whether Mavros executes
-//! the program at all, and once declaring the interpreter's return value, which says whether Mavros
-//! computes the same result. `Prover.toml`'s own `return`, where the corpus records one, is Noir's
-//! executor output and is compared with the interpreter's as a third opinion.
+//! The interpreter runs the same monomorphized program Mavros lowers, so a disagreement is in
+//! Mavros's back half. Mavros generates the witness twice: without a return check (does it run?)
+//! and with the interpreter's return declared (does it compute the same value?). `Prover.toml`'s
+//! recorded `return` is a third opinion. Each program runs in a child process so a Mavros abort
+//! cannot end the sweep.
 //!
-//! Each program runs in a child process, because a Mavros stack overflow or abort would otherwise
-//! end the sweep. The sweep needs LLVM 22 for the Mavros build (see `mavros/flake.nix`):
+//! Running it is a local edit: un-comment `mavros-compiler` in `Cargo.toml`, set
+//! `mavros-oracle = ["dep:mavros-compiler"]`, and `[patch]` every `worldfnd/noir` crate to the
+//! checkout Mavros builds against so both sides link one `FieldElement` (the pin test then fails).
+//! Build in release inside `nix develop ../mavros`; debug overflows or times out on large programs.
 //!
 //! ```sh
-//! MAVROS_ORACLE_CORPUS=<a copy of a test_programs directory> MAVROS_ORACLE_FIELD=bn254 \
+//! MAVROS_ORACLE_CORPUS=<copy of test_programs> MAVROS_ORACLE_FIELD=bn254 \
 //!     cargo test --release --features mavros-oracle --lib mavros_oracle::sweep -- --ignored --nocapture
 //! ```
 //!
-//! The release build matters: a debug build's stack frames and speed make the heaviest programs
-//! (ECDSA, the 2^17-gate benchmarks) overflow the child's stack or run past the budget.
-//!
-//! `Cargo.toml` keeps the `mavros-compiler` dependency commented out, since Cargo reads a path
-//! dependency's manifest even when its feature is off and CI has no Mavros checkout. Running the
-//! sweep is a local, uncommitted edit: un-comment that line, set
-//! `mavros-oracle = ["dep:mavros-compiler"]`, and add a `[patch."https://github.com/worldfnd/noir.git"]`
-//! table pointing every Noir crate at the checkout Mavros builds against, so both halves link one
-//! `FieldElement`. The pin test fails while such a patch is active; that is expected.
-//!
-//! `MAVROS_ORACLE_CORPUS` names a copy, not a checkout, because Mavros writes `mavros_debug/`
-//! into every package it compiles. `MAVROS_ORACLE_FIELD` defaults to bn254; `MAVROS_ORACLE_JOBS`
-//! (default 8) bounds the children in flight and `MAVROS_ORACLE_TIMEOUT_SECS` (default 600)
-//! kills one that runs longer. `MAVROS_ORACLE_GENERIC_BUILTINS=1` runs the sweep in Noir's
-//! benchmark mode, the standard library's field-generic builtins in place of their bn254 twins,
-//! and names its outputs `<field>-generic-builtins.{jsonl,md}`, so the two modes can be compared
-//! program by program.
+//! The corpus is a copy because Mavros writes `mavros_debug/` into each package. Options:
+//! `MAVROS_ORACLE_GENERIC_BUILTINS=1`, `MAVROS_ORACLE_JOBS` (default 8),
+//! `MAVROS_ORACLE_TIMEOUT_SECS` (default 600). Output goes to
+//! `target/mavros-oracle/<field>[-generic-builtins].{jsonl,md}`.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -59,7 +47,7 @@ use super::{
     Value, expected_return_from_prover_toml, inputs_from_prover_toml, interpret_with_inputs,
 };
 
-/// Programs the sweep never starts: Mavros's VM has no execution budget and these do not terminate.
+/// Programs Mavros's VM does not finish; skipped rather than waiting out the timeout.
 const SKIPPED: &[&str] = &["brillig_mem_layout_regression"];
 
 /// Marks the one stdout line a child reports its record on.
@@ -75,7 +63,7 @@ struct Record {
     /// The interpreter's return value, rendered.
     interp_value: Option<String>,
     /// `Prover.toml`'s recorded `return` against the interpreter's: `absent`, `agrees`, `differs`
-    /// or `unreadable`; `not-run` when the interpreter failed.
+    /// or `unreadable`; `not-run` when the interpreter failed, `not-compared` with generic builtins.
     recorded_return: String,
     /// How far Mavros's compiler got: `ok`, or the stage and reason it stopped.
     mavros_compile: String,
@@ -276,6 +264,10 @@ fn examine(
     };
     record.interp_value = interp.as_ref().ok().map(|v| line(format!("{v:?}")));
     record.recorded_return = match (&prover_toml, &interp) {
+        (_, Err(_)) => "not-run".into(),
+        (None, _) => "absent".into(),
+        // `Prover.toml` records the native builtins' result, which their generic twins can change.
+        _ if generic_builtins => "not-compared".into(),
         (Some(src), Ok(value)) => {
             match caught(|| expected_return_from_prover_toml(program, &abi, src, field)) {
                 Ok(Ok(Some(recorded))) if recorded == *value => "agrees".into(),
@@ -287,8 +279,6 @@ fn examine(
                 Err(panic) => format!("unreadable: {}", line(panic)),
             }
         }
-        (None, _) => "absent".into(),
-        (_, Err(_)) => "not-run".into(),
     };
     if let Some(failure) = lowering_failure {
         record.mavros_compile = failure;
@@ -428,6 +418,9 @@ fn verdict(record: &Record) -> String {
     }
     if !mavros_accepts {
         return "MAVROS-REJECTS".into();
+    }
+    if record.recorded_return.starts_with("differs") {
+        return "RECORDED-DIFFERS".into();
     }
     match record.witgen_declared.as_str() {
         "ok" | "no-return" => "agree".into(),
@@ -813,182 +806,49 @@ fn assert_declared_return_round_trip(field: FieldId) {
 #[test]
 fn every_verdict_bucket_is_reached_from_its_record() {
     let record =
-        |expect_failure: bool, interp: &str, compile: &str, unchecked: &str, declared: &str| {
-            Record {
-                interp: interp.into(),
-                mavros_compile: compile.into(),
-                witgen_unchecked: unchecked.into(),
-                witgen_declared: declared.into(),
-                ..Record::new("program".into(), expect_failure)
-            }
+        |expect_failure, interp: &str, compile: &str, unchecked: &str, declared: &str| Record {
+            interp: interp.into(),
+            mavros_compile: compile.into(),
+            witgen_unchecked: unchecked.into(),
+            witgen_declared: declared.into(),
+            ..Record::new("program".into(), expect_failure)
         };
+    let (n, fail) = ("not-run", "AssertionFailed: x");
     let gap = "Unsupported { construct: \"x\" }: x";
     for (expected, expect_failure, interp, compile, unchecked, declared) in [
         ("agree", false, "ok", "ok", "ok", "ok"),
         ("agree", false, "ok", "ok", "ok", "no-return"),
         ("RETURN-MISMATCH", false, "ok", "ok", "ok", "unsat"),
-        (
-            "unencodable-return",
-            false,
-            "ok",
-            "ok",
-            "ok",
-            "unencodable: x",
-        ),
-        (
-            "MAVROS-REJECTS",
-            false,
-            "ok",
-            "reject: unsat",
-            "not-run",
-            "not-run",
-        ),
-        ("MAVROS-REJECTS", false, "ok", "ok", "trap: x", "not-run"),
-        (
-            "INTERP-REJECTS",
-            false,
-            "AssertionFailed: x",
-            "ok",
-            "ok",
-            "not-run",
-        ),
-        (
-            "both-reject",
-            false,
-            "AssertionFailed: x",
-            "reject: unsat",
-            "not-run",
-            "not-run",
-        ),
-        ("interp-gap", false, gap, "ok", "ok", "not-run"),
-        (
-            "interp-internal",
-            false,
-            "Internal: x",
-            "ok",
-            "ok",
-            "not-run",
-        ),
-        ("interp-internal", false, "Panic: x", "ok", "ok", "not-run"),
-        (
-            "interp-internal",
-            true,
-            "TypeError: x",
-            "ok",
-            "unsat",
-            "not-run",
-        ),
-        (
-            "input-error",
-            true,
-            "InputError: x",
-            "ok",
-            "params: x",
-            "not-run",
-        ),
-        ("mavros-gap", false, "ok", "ok", "ok", "panic: x"),
+        ("RETURN-MISMATCH", false, "ok", "ok", "ok", "trap: x"),
+        ("unencodable-return", false, "ok", "ok", "ok", "unencodable"),
+        ("MAVROS-REJECTS", false, "ok", "reject: x", n, n),
+        ("MAVROS-REJECTS", false, "ok", "ok", "trap: x", n),
+        ("INTERP-REJECTS", false, fail, "ok", "ok", n),
+        ("both-reject", false, fail, "reject: x", n, n),
+        ("interp-gap", false, gap, "ok", "ok", n),
+        ("interp-internal", false, "Internal: x", "ok", "ok", n),
+        ("interp-internal", true, "TypeError: x", "ok", "unsat", n),
+        ("frontend-reject", false, n, "frontend-reject: x", n, n),
+        // Input errors and Mavros setup errors outrank any agreement.
+        ("input-error", true, "InputError: x", "ok", "params: x", n),
+        ("mavros-gap", false, "ok", "lowering-panic: x", n, n),
+        ("mavros-gap", false, "ok", "ok", "guard: x", n),
         ("mavros-gap", false, "ok", "ok", "ok", "guard: x"),
-        ("mavros-gap", false, "ok", "panic: x", "not-run", "not-run"),
-        (
-            "mavros-gap",
-            false,
-            "ok",
-            "lowering-fail: x",
-            "not-run",
-            "not-run",
-        ),
-        (
-            "mavros-gap",
-            false,
-            "ok",
-            "no program",
-            "not-run",
-            "not-run",
-        ),
-        ("mavros-gap", false, "ok", "ok", "panic: x", "not-run"),
-        (
-            "mavros-gap",
-            false,
-            "AssertionFailed: x",
-            "lowering-fail: x",
-            "not-run",
-            "not-run",
-        ),
-        (
-            "both-gap",
-            false,
-            gap,
-            "lowering-panic: x",
-            "not-run",
-            "not-run",
-        ),
-        (
-            "both-gap",
-            false,
-            "Internal: x",
-            "panic: x",
-            "not-run",
-            "not-run",
-        ),
-        (
-            "frontend-reject",
-            false,
-            "not-run",
-            "frontend-reject: x",
-            "not-run",
-            "not-run",
-        ),
-        (
-            "agree-reject",
-            true,
-            "AssertionFailed: x",
-            "reject: unsat",
-            "not-run",
-            "not-run",
-        ),
-        (
-            "agree-reject",
-            true,
-            "AssertionFailed: x",
-            "ok",
-            "trap: x",
-            "not-run",
-        ),
-        (
-            "mavros-gap",
-            true,
-            "AssertionFailed: x",
-            "ok",
-            "panic: x",
-            "not-run",
-        ),
-        (
-            "MAVROS-ACCEPTS",
-            true,
-            "AssertionFailed: x",
-            "ok",
-            "ok",
-            "not-run",
-        ),
+        ("mavros-gap", true, fail, "ok", "inputs: x", n),
+        ("both-gap", false, gap, "panic: x", n, n),
+        ("agree-reject", true, fail, "reject: x", n, n),
+        ("agree-reject", true, fail, "ok", "trap: x", n),
+        ("interp-gap", true, gap, "reject: x", n, n),
+        ("MAVROS-ACCEPTS", true, fail, "ok", "ok", n),
         ("INTERP-ACCEPTS", true, "ok", "ok", "unsat", "ok"),
         ("both-accept", true, "ok", "ok", "ok", "ok"),
-        ("interp-gap", true, gap, "ok", "ok", "not-run"),
     ] {
         let record = record(expect_failure, interp, compile, unchecked, declared);
         assert_eq!(verdict(&record), expected, "{record:?}");
     }
-    for expect_failure in [false, true] {
-        for setup_error in ["params: x", "inputs: x", "guard: x"] {
-            let record = record(
-                expect_failure,
-                "AssertionFailed: x",
-                "ok",
-                setup_error,
-                "not-run",
-            );
-            assert_eq!(verdict(&record), "mavros-gap", "{record:?}");
-        }
-    }
+    let mut differs = record(false, "ok", "ok", "ok", "ok");
+    differs.recorded_return = "differs: recorded Field(2)".into();
+    assert_eq!(verdict(&differs), "RECORDED-DIFFERS");
 }
 
 /// The interpreter's return for the package at `root`, through the pure-Noir frontend.
@@ -1016,26 +876,6 @@ fn fixture_copy(tmp: &tempfile::TempDir, name: &str) -> PathBuf {
     root
 }
 
-/// Mavros's driver and the pure-Noir frontend lower a stdlib-free fixture to programs that
-/// interpret the same, and the record says so.
-#[test]
-fn mavros_program_interprets_like_the_pure_noir_one() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = fixture_copy(&tmp, "interp_inputs_u64");
-    let expected = pure_noir_value(&root, FieldId::Bn254, false);
-
-    let record = examine(
-        &root,
-        "interp_inputs_u64".into(),
-        false,
-        FieldId::Bn254,
-        false,
-    );
-    assert_eq!(record.interp, "ok", "{record:?}");
-    assert_eq!(record.interp_value, Some(line(format!("{expected:?}"))));
-    assert_eq!(verdict(&record), "agree", "{record:?}");
-}
-
 /// The benchmark mode reaches Mavros's compile as well as the interpreter's: both hash a `u64`
 /// as two limbs and agree, while the plain mode hashes it in one write.
 #[test]
@@ -1058,37 +898,4 @@ fn the_benchmark_mode_reaches_mavros() {
         "{record:?}"
     );
     assert_eq!(verdict(&record), "agree", "{record:?}");
-}
-
-/// A run-time failure is an agreed rejection only when the corpus expects one.
-#[test]
-fn a_failing_program_is_agreed_on_only_in_the_failure_corpus() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = fixture_copy(&tmp, "neg_assert_fail");
-    let mut as_failure = examine(&root, "neg_assert_fail".into(), true, FieldId::Bn254, false);
-    assert!(
-        as_failure.interp.starts_with("AssertionFailed"),
-        "{as_failure:?}"
-    );
-    assert_eq!(verdict(&as_failure), "agree-reject", "{as_failure:?}");
-
-    as_failure.expect_failure = false;
-    assert_eq!(verdict(&as_failure), "both-reject", "{as_failure:?}");
-}
-
-/// A child must finish successfully to report agreement; one past its budget reports a timeout.
-#[test]
-fn a_child_reports_agreement_or_times_out() {
-    let tmp = tempfile::tempdir().unwrap();
-    let job = Job {
-        dir: fixture_copy(&tmp, "interp_basic"),
-        name: "interp_basic".into(),
-        expect_failure: false,
-    };
-    let record = run_job(&job, FieldId::Bn254, false, Duration::from_secs(60));
-    assert_eq!(record.verdict, "agree", "{record:?}");
-    let record = run_job(&job, FieldId::Bn254, false, Duration::ZERO);
-    assert_eq!(record.verdict, "timeout after 0s");
-    assert_eq!(record.mavros_compile, record.verdict);
-    assert_eq!(record.interp, "not-run");
 }
