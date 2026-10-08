@@ -4,9 +4,9 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 
 | provenance | value |
 | --- | --- |
-| noir_rev | 225db3e18f0ffaeeb3919a668f78b9e9c867b41f |
-| corpus_hash | 3ad62c2ccd6466555cdc14ba75992a0fdbb31beb14fec9fc46f62680576ebc7a |
-| programs | 509 corpus, 46 fixtures |
+| noir_rev | 59467ac7c66cc27dcf70edc22a9d8b655a9fdf76 |
+| corpus_hash | ff2666187239db5e9c36c8315b64f114ce891b681ff989415d70aa330ba14082 |
+| programs | 496 corpus, 47 fixtures |
 | toolchain | rustc 1.89.0 (29483883e 2025-08-04) |
 | format | dump 5, projection 3 |
 
@@ -164,6 +164,7 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/interp_closures | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 42450ade |
 | fixtures/interp_derive_eq_hash | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 28c69462 |
 | fixtures/interp_field_lt | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | bfa709b3 |
+| fixtures/interp_generic_twins | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal* | ❌ | e44cf788 |
 | fixtures/interp_hash_limbs | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | e91c024f |
 | fixtures/interp_inputs_i32 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | af422c29 |
 | fixtures/interp_inputs_i64 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | c1dd9e68 |
@@ -173,7 +174,6 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/interp_intrinsic_hints | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 4e1a5fab |
 | fixtures/interp_match_enum | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 5ae2b058 |
 | fixtures/interp_match_int | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 69812da6 |
-| fixtures/interp_refcount_constrained | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | a160b8ef |
 | fixtures/interp_refs_call_chain | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | de0ecb0f |
 | fixtures/interp_refs_double_deref_alias | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 8700182b |
 | fixtures/interp_refs_nested_field | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 01c844d2 |
@@ -181,14 +181,14 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/interp_refs_struct_field | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | b23c1fda |
 | fixtures/interp_return_i64 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | d98a2d5c |
 | fixtures/interp_str_bytes | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6a1a68e4 |
-| fixtures/interp_width_10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 6df592ef |
+| fixtures/interp_width_10 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | b187712f |
 | fixtures/interp_width_126 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 41d0e102 |
 | fixtures/interp_width_128 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | a7668db8 |
 | fixtures/interp_width_16384 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 864c8180 |
-| fixtures/interp_width_2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 70207f1e |
-| fixtures/interp_width_33 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 88839512 |
-| fixtures/interp_width_34 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 7c1499ec |
-| fixtures/interp_width_36 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 88df8be2 |
+| fixtures/interp_width_2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 1dee9fcc |
+| fixtures/interp_width_33 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 433f05a5 |
+| fixtures/interp_width_34 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 026be225 |
+| fixtures/interp_width_36 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | ab88cf27 |
 | fixtures/interp_width_66 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | c7f7c45d |
 | fixtures/interp_wrapping_ops | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ❌ | 5d2c9c63 |
 | fixtures/intrinsic_conversions | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | a6992c0a |
@@ -197,23 +197,15 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | fixtures/intrinsic_to_bytes | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ❌ | 16f8d089 |
 | fixtures/neg_assert_fail | ✅ | ❌ | ➖ | ✅ | ❌ | ➖ | ✅ equal | ✅ | fa98970b |
 | fixtures/neg_assert_fmt_msg | ✅ | ❌ | ➖ | ✅ | ❌ | ➖ | ✅ equal | ✅ | d8f9ae3f |
+| fixtures/neg_entry_width_u24 | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | edeb52cd |
 | fixtures/neg_interp_cast_u64_to_field | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | e9d03c0b |
 | fixtures/neg_reachable_error | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | 27f038d8 |
-| fixtures/neg_wide_input_u66 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 6ead5a2b |
+| fixtures/neg_wide_input_u128 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 73f115f9 |
 | fixtures/neg_width_above_max | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | f5d6d74e |
 | fixtures/neg_width_one | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | ef886fe0 |
 | fixtures/neg_width_unresolved | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | 890885ed |
 | fixtures/neg_width_zero | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ | ✅ equal | ➖ | a4189760 |
 | fmtstr_with_global | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | a6b53335 |
-| fold_2_to_17 | ✅ | ✅ | ➖ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 3b5584e3 |
-| fold_after_inlined_calls | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 36beab00 |
-| fold_basic | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | e1620ba8 |
-| fold_basic_nested_call | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 73e3b7dd |
-| fold_call_witness_condition | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 1636bea6 |
-| fold_complex_outputs | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 1665787b |
-| fold_distinct_return | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 6ba15b9a |
-| fold_fibonacci | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 5387e09e |
-| fold_numeric_generic_poseidon | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | 09252c3f |
 | for_loop_inclusive_empty_range | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | fd72c9ea |
 | for_loop_inclusive_u8_max | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 76324554 |
 | for_loop_inclusive_with_break | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 3d327002 |
@@ -307,15 +299,11 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 | ref_in_unconstrained_function_pointer | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | e4c2ed48 |
 | reference_alias_in_array | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | c3ed592f |
 | reference_cancelling | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 0fa189ec |
-| reference_counts_inliner_0 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 2d0978ea |
-| reference_counts_inliner_max | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 99c1cb26 |
-| reference_counts_inliner_min | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | e616c0be |
-| reference_counts_vectors_inliner_0 | ✅ | ❌ | ➖ | ✅ | ❌ | ➖ | 🟡 both-sides | ✅ | 4931ffca |
 | reference_only_used_as_alias | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 10c71f1f |
 | references | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | ba631fad |
 | regression_10008 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | e0d3ff59 |
 | regression_10141 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | aa73f92e |
-| regression_10156 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 1e6b2e5c |
+| regression_10156 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ equal | ✅ | 1c97c2da |
 | regression_10158 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 4dbd110f |
 | regression_10170 | ✅ | ✅ | ➖ | ✅ | ✅ | ➖ | ✅ equal | ✅ | 13e92c9c |
 | regression_10180 | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | 🟡 predicted | ➖ | a5c7b110 |
@@ -572,21 +560,21 @@ Every program of Noir's `execution_success` corpus and this crate's fixtures, co
 
 | column | ✅ | ❌ | ➖ |
 | --- | --- | --- | --- |
-| bn254 compile | 547 | 5 | 3 |
-| bn254 run | 544 | 3 | 8 |
-| bn254 return | 203 | 0 | 352 |
-| goldilocks compile | 493 | 59 | 3 |
-| goldilocks run | 477 | 16 | 62 |
-| goldilocks return | 168 | 0 | 387 |
-| AST | 466 | 27 | 62 |
+| bn254 compile | 534 | 6 | 3 |
+| bn254 run | 532 | 2 | 9 |
+| bn254 return | 201 | 0 | 342 |
+| goldilocks compile | 482 | 58 | 3 |
+| goldilocks run | 467 | 15 | 61 |
+| goldilocks return | 167 | 0 | 376 |
+| AST | 454 | 28 | 61 |
 
 | Fields | count |
 | --- | --- |
-| ✅ equal | 482 |
-| ✅ equal* | 2 |
-| 🟡 predicted | 43 |
+| ✅ equal | 472 |
+| ✅ equal* | 3 |
+| 🟡 predicted | 41 |
 | 🟡 field-dependent | 24 |
-| 🟡 both-sides | 1 |
+| 🟡 both-sides | 0 |
 | ⚠️ unexpected | 0 |
 | ❌ divergence | 0 |
 | ➖ not run | 3 |

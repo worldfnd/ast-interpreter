@@ -34,8 +34,10 @@ The `bn254-crypto` feature, on by default, routes the embedded-curve, Pedersen-g
 Poseidon2 built-ins to `bn254_blackbox_solver`; they take bn254 values only, which is the one field
 where Noir's standard library reaches them.
 
-The `mavros-oracle` feature is a placeholder. Its `mavros-compiler` dependency is commented out, so
-enabling the feature fails the build with a `compile_error!` saying so.
+The `mavros-oracle` feature builds the differential oracle against Mavros (`src/mavros_oracle.rs`,
+whose module doc has the sweep command). It needs a `../mavros` checkout pinned to the same Noir
+revision, and LLVM 22 for the Mavros build. Its `mavros-compiler` dependency is commented out in
+`Cargo.toml`, so CI needs no Mavros checkout; the module doc says what to un-comment to run it.
 
 `InterpretError` separates bad caller data (`InvalidInput`), runtime range errors
 (`ValueOutOfRange`), invalid AST value shapes (`Type`), and interpreter invariant failures
@@ -74,5 +76,4 @@ requires both.
 every argument-less `#[test]` of the standard library through the interpreter under their field;
 one it cannot run fails them, except bn254's own crypto when `bn254-crypto` is off.
 `tests::oracle_survey_execution_success` separately compares the interpreter with Noir's executor;
-its doc comment has the command. Unsupported intrinsics, such as a reference count taken in
-unconstrained code, remain explicit coverage gaps.
+its doc comment has the command. Unsupported intrinsics remain explicit coverage gaps.

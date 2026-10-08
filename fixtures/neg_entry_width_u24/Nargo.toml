@@ -1,5 +1,5 @@
 [package]
-name = "interp_refcount_constrained"
+name = "neg_entry_width_u24"
 type = "bin"
 authors = [""]
 

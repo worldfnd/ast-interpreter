@@ -54,10 +54,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
         with:
           toolchain: 1.89.0
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ast-interpreter
           key: ${{ matrix.field }}
+      - name: Formatting
+        if: matrix.field == 'bn254'
+        working-directory: ast-interpreter
+        run: cargo fmt --all --check
+      - name: Clippy
+        working-directory: ast-interpreter
+        run: cargo clippy --locked --all-targets ${{ matrix.features }} -- -D warnings
       - name: Fixture suite
         working-directory: ast-interpreter
         run: cargo test --locked ${{ matrix.features }}
