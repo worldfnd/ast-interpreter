@@ -14,9 +14,10 @@ use super::validation_frontend::{
     Validated, compile_for_validation, compile_for_validation_with, stdlib_tests,
 };
 use super::{
-    IntValue, InterpretError, Value, inputs_from_prover_toml, interpret, interpret_with_inputs,
+    IntValue, InterpretError, Value, inputs_from_bytes, inputs_from_prover_toml, interpret,
+    interpret_with_inputs,
 };
-use acvm::{FieldConfig, FieldId, FieldValue};
+use acvm::{FieldId, FieldValue};
 use noirc_frontend::token::TestScope;
 use num_bigint::{BigInt, BigUint};
 
@@ -71,22 +72,12 @@ fn run_fixture_with(field: FieldId, name: &str, generic_builtins: bool) -> (Valu
     let validated = compile_for_validation_with(&project, field, generic_builtins)
         .unwrap_or_else(|error| panic!("{name}: {field}: frontend: {error}"));
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .unwrap_or_else(|error| panic!("{name}: {field}: inputs: {error}"));
+    let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, &toml)
+        .unwrap_or_else(|error| panic!("{name}: {field}: inputs: {error}"));
     let result = interpret_with_inputs(&validated.program, inputs, validated.field_id)
         .unwrap_or_else(|error| panic!("{name}: {field}: interpret: {error}"));
-    let recorded = expected_return_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .unwrap_or_else(|error| panic!("{name}: {field}: recorded return: {error}"));
+    let recorded = expected_return_from_prover_toml(&validated.program, &validated.abi, &toml)
+        .unwrap_or_else(|error| panic!("{name}: {field}: recorded return: {error}"));
     (result, recorded)
 }
 
@@ -109,29 +100,15 @@ fn one_build_interprets_a_program_under_two_fields() {
         let result = interpret(&validated.program, validated.field_id)
             .unwrap_or_else(|error| panic!("{field}: interpret: {error:?}"));
         assert_eq!(result, Value::Unit, "{field}: main returns unit");
-
-        let validated = compile_source("fn main(x: Field) -> pub Field { x - 2 }", field);
-        let result = interpret_with_inputs(
-            &validated.program,
-            vec![Value::Field(FieldValue::one(field))],
-            validated.field_id,
-        )
-        .expect("field arithmetic");
-        let Value::Field(result) = result else {
-            panic!("expected a Field return")
-        };
-        assert_eq!(result.field(), field);
-        assert_eq!(
-            result.as_biguint(),
-            &(FieldConfig::new(field).modulus() - 1u8)
-        );
     }
 }
 
+/// Both bridges, the byte one for inputs and the field-element one for the executor's return,
+/// refuse a scalar whose ABI type disagrees with its program type as an internal error.
 #[test]
 fn a_scalar_whose_abi_type_disagrees_with_its_program_type_is_refused() {
     use noirc_abi::input_parser::InputValue;
-    use noirc_abi::{AbiType, Sign};
+    use noirc_abi::{AbiType, Sign, bytes};
     use noirc_frontend::monomorphization::ast::Type;
     use noirc_frontend::shared::Signedness;
 
@@ -144,6 +121,7 @@ fn a_scalar_whose_abi_type_disagrees_with_its_program_type_is_refused() {
         width: 8,
     };
     let input = InputValue::Field(5u8.into());
+    let decoded = bytes::Value::Int(BigInt::from(5));
     for (abi_type, typ) in [
         (AbiType::Field, Type::Bool),
         (u64_abi.clone(), Type::Bool),
@@ -151,134 +129,147 @@ fn a_scalar_whose_abi_type_disagrees_with_its_program_type_is_refused() {
         (u8_abi, Type::Integer(Signedness::Signed, 8)),
         (AbiType::Boolean, Type::Field),
     ] {
-        let result = crate::input::value_from_input(&input, &abi_type, &typ, FieldId::Bn254);
+        let result = super::noir_oracle::value_from_input(&input, &abi_type, &typ, FieldId::Bn254);
         assert!(
             matches!(result, Err(InterpretError::Internal(_))),
             "{abi_type:?} as {typ:?}: {result:?}"
         );
+        let result = crate::input::bind(&decoded, &abi_type, &typ);
+        assert!(
+            matches!(result, Err(InterpretError::Internal(_))),
+            "bytes: {abi_type:?} as {typ:?}: {result:?}"
+        );
     }
 }
 
+/// A `Prover.toml` and the blob it encodes to give the same values under every field: a negative
+/// `i8`, and a `u128` above the Goldilocks modulus.
 #[test]
-fn toml_bridge_reads_inputs_in_the_programs_field() {
+fn toml_bridge_reads_the_same_values_under_every_field() {
+    let source = "fn main(x: i8, y: u128) -> pub u128 { if x < 0 { y } else { 0 } }";
+    let toml = "x = -1\ny = \"36893488147419103232\"\nreturn = \"36893488147419103232\"";
+    // `x` in one byte, then `y` in sixteen little-endian bytes.
+    let blob = [vec![0xff], vec![0; 8], vec![0x02], vec![0; 7]].concat();
+    let x = Value::Int(IntValue::canonical(true, 8, BigInt::from(-1)));
+    let y = Value::Int(IntValue::canonical(
+        false,
+        128,
+        BigInt::from(1u8) << 65usize,
+    ));
     for field in [FieldId::Bn254, FieldId::Goldilocks] {
-        let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
-        for (toml, expected) in [
-            ("x = -1\nreturn = -1", -FieldValue::one(field)),
-            ("x = 1\nreturn = 1", FieldValue::one(field)),
-        ] {
-            let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, toml, field)
-                .unwrap_or_else(|error| panic!("{field}: {toml}: {error}"));
-            let recorded =
-                expected_return_from_prover_toml(&validated.program, &validated.abi, toml, field)
-                    .unwrap_or_else(|error| panic!("{field}: {toml}: {error}"));
-            assert_eq!(
-                inputs,
-                vec![Value::Field(expected.clone())],
-                "{field}: {toml}"
-            );
-            assert_eq!(recorded, Some(Value::Field(expected)), "{field}: {toml}");
-        }
+        let validated = compile_source(source, field);
+        let (program, abi) = (&validated.program, &validated.abi);
+        let inputs = inputs_from_prover_toml(program, abi, toml)
+            .unwrap_or_else(|error| panic!("{field}: {error}"));
+        assert_eq!(inputs, vec![x.clone(), y.clone()], "{field}");
+        assert_eq!(
+            inputs_from_bytes(program, abi, &blob).unwrap(),
+            inputs,
+            "{field}"
+        );
+        let recorded = expected_return_from_prover_toml(program, abi, toml).unwrap();
+        assert_eq!(recorded, Some(y.clone()), "{field}");
+        let returned = interpret_with_inputs(program, inputs, validated.field_id).unwrap();
+        assert_eq!(returned, y, "{field}");
     }
 }
 
-#[test]
-fn the_input_bridge_follows_the_abi_boundary_vectors() {
-    use noirc_abi::conformance::boundary_vectors;
-    use noirc_abi::input_parser::Format;
-    use noirc_abi::{AbiParameter, AbiType, AbiVisibility, Sign};
+/// The monomorphized type of an entry-point value of `typ`, as the frontend lowers it.
+fn mono_type(typ: &noirc_abi::AbiType) -> noirc_frontend::monomorphization::ast::Type {
+    use noirc_abi::{AbiType, Sign};
     use noirc_frontend::monomorphization::ast::Type;
     use noirc_frontend::shared::Signedness;
 
-    for field in [FieldId::Bn254, FieldId::Goldilocks] {
-        let config = FieldConfig::new(field);
-        for vector in boundary_vectors(config) {
-            let abi = noirc_abi::Abi {
-                parameters: vec![AbiParameter {
-                    name: "x".to_string(),
-                    typ: vector.typ.clone(),
-                    visibility: AbiVisibility::Private,
-                }],
-                return_type: None,
-                error_types: Default::default(),
+    match typ {
+        AbiType::Field => Type::Field,
+        AbiType::Boolean => Type::Bool,
+        AbiType::Integer { sign, width } => {
+            let signedness = match sign {
+                Sign::Unsigned => Signedness::Unsigned,
+                Sign::Signed => Signedness::Signed,
             };
-            let typ = match &vector.typ {
-                AbiType::Field => Type::Field,
-                AbiType::Boolean => Type::Bool,
-                AbiType::Integer { sign, width } => {
-                    let signedness = match sign {
-                        Sign::Unsigned => Signedness::Unsigned,
-                        Sign::Signed => Signedness::Signed,
-                    };
-                    Type::Integer(signedness, *width)
-                }
-                other => panic!("boundary vectors are scalars, got {other:?}"),
-            };
-            let parsed = Format::Toml.parse(&format!("x = {}", vector.spelling), &abi, config);
-            match (parsed, &vector.element) {
-                (Ok(inputs), Some(element)) => {
-                    let value =
-                        crate::input::value_from_input(&inputs["x"], &vector.typ, &typ, field)
-                            .unwrap_or_else(|error| panic!("{field}: {vector:?}: {error}"));
-                    let expected = match &typ {
-                        Type::Field => Value::Field(
-                            FieldValue::try_from_biguint(element.clone(), field)
-                                .expect("an accepted element is below the modulus"),
-                        ),
-                        Type::Bool => Value::Bool(*element == 1u8.into()),
-                        Type::Integer(signedness, bits) => Value::Int(IntValue::canonical(
-                            signedness.is_signed(),
-                            *bits,
-                            BigInt::from(element.clone()),
-                        )),
-                        _ => unreachable!(),
-                    };
-                    assert_eq!(value, expected, "{field}: {vector:?}");
-                }
-                (Err(_), None) => {}
-                (parsed, element) => {
-                    panic!("{field}: {vector:?}: parsed {parsed:?}, expected {element:?}")
-                }
-            }
+            Type::Integer(signedness, *width)
+        }
+        AbiType::String { length } => Type::String(*length),
+        AbiType::Array { length, typ } => Type::Array(*length, Rc::new(mono_type(typ))),
+        AbiType::Tuple { fields } => Type::Tuple(fields.iter().map(mono_type).collect()),
+        AbiType::Struct { fields, .. } => {
+            Type::Tuple(fields.iter().map(|(_, typ)| mono_type(typ)).collect())
         }
     }
 }
 
+/// The input bridge reads every case of the byte codec's conformance vectors: an accepted case's
+/// TOML and blob bind to the same values, which hold under every field, and a refused document or
+/// blob is invalid input.
+#[test]
+fn the_input_bridge_follows_the_byte_vectors() {
+    use crate::input::{bind_params, parse_prover_toml};
+    use noirc_abi::bytes;
+    use noirc_abi::conformance::byte_vectors;
+
+    for vector in byte_vectors() {
+        let types: Vec<_> = vector
+            .abi
+            .parameters
+            .iter()
+            .map(|p| mono_type(&p.typ))
+            .collect();
+        let parameters: Vec<(&str, &_)> = vector
+            .abi
+            .parameters
+            .iter()
+            .zip(&types)
+            .map(|(p, typ)| (p.name.as_str(), typ))
+            .collect();
+        let from_toml = vector.toml.as_ref().map(|toml| {
+            parse_prover_toml(toml, &vector.abi).and_then(|inputs| {
+                let blob = bytes::encode_params(&vector.abi, &inputs.params)
+                    .expect("parsed inputs encode");
+                bind_params(&vector.abi, &parameters, &blob)
+            })
+        });
+        let from_bytes = vector
+            .bytes
+            .as_ref()
+            .map(|blob| bind_params(&vector.abi, &parameters, blob));
+        for result in from_toml.iter().chain(&from_bytes) {
+            match result {
+                Ok(values) if vector.accept => {
+                    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+                        crate::input::validate_inputs(values, field)
+                            .unwrap_or_else(|e| panic!("{}: {field}: {e}", vector.name));
+                    }
+                }
+                Err(InterpretError::InvalidInput(_)) if !vector.accept => {}
+                result => panic!("{}: accept = {}: {result:?}", vector.name, vector.accept),
+            }
+        }
+        if let (Some(Ok(toml)), Some(Ok(blob))) = (&from_toml, &from_bytes) {
+            assert_eq!(toml, blob, "{}", vector.name);
+        }
+    }
+}
+
+/// A `Field` built by a caller must belong to the program's field. No entry point takes a
+/// `Field`, so a stray one from another field is refused before the program runs, wherever it
+/// hides.
 #[test]
 fn rejects_inputs_from_another_field() {
     let (field, other) = (FieldId::Bn254, FieldId::Goldilocks);
-    let good = Value::Field(FieldValue::one(field));
     let bad = Value::Field(FieldValue::one(other));
     let cell = |value: &Value| Rc::new(RefCell::new(value.clone()));
-    for (source, good_input, bad_input) in [
-        (
-            "fn main(x: Field) -> pub Field { x }",
-            good.clone(),
-            bad.clone(),
-        ),
-        (
-            "fn main(x: ([Field; 1], Field)) -> pub Field { x.1 }",
-            Value::tuple(vec![Value::Array(vec![good.clone()]), good.clone()]),
-            Value::tuple(vec![Value::Array(vec![bad.clone()]), good.clone()]),
-        ),
-    ] {
-        let validated = compile_source(source, field);
-        assert_eq!(
-            interpret_with_inputs(&validated.program, vec![good_input], field).unwrap(),
-            good
-        );
-        let result = interpret_with_inputs(&validated.program, vec![bad_input], field);
-        assert!(
-            matches!(result, Err(InterpretError::InvalidInput(_))),
-            "{result:?}"
-        );
-    }
-
-    // Caller-built values must be checked even inside shapes the ABI cannot express.
-    let validated = compile_source("fn main(x: Field) -> pub Field { x }", field);
+    let validated = compile_source("fn main(x: u8) -> pub u8 { x }", field);
+    let one = Value::Int(IntValue::canonical(false, 8, BigInt::from(1)));
+    assert_eq!(
+        interpret_with_inputs(&validated.program, vec![one.clone()], field).unwrap(),
+        one
+    );
     for hidden in [
+        bad.clone(),
         Value::Ref(cell(&bad), false),
         Value::Array(vec![Value::Ref(cell(&bad), false)]),
+        Value::tuple(vec![Value::Array(vec![bad.clone()]), one.clone()]),
         Value::tuple(vec![Value::Ref(cell(&bad), true)]),
         Value::FmtStr {
             fragments: Vec::new(),
@@ -362,13 +353,8 @@ fn interprets_fixture_inputs_from_prover_toml() {
     let project = NoirProject::new(root.clone()).expect("project");
     let validated = compile_for_validation(&project, FieldId::Bn254).expect("frontend");
     let toml = std::fs::read_to_string(root.join("Prover.toml")).expect("Prover.toml");
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
 
     assert!(matches!(
         interpret_with_inputs(&validated.program, Vec::new(), validated.field_id),
@@ -423,49 +409,63 @@ fn bn254_casts_u64_to_field_exactly() {
     let project = NoirProject::new(negative_fixture("interp_cast_u64_to_field")).expect("project");
     let validated = compile_for_validation(&project, FieldId::Bn254).expect("frontend");
     let toml = format!("hi = \"{}\"\nlo = \"{}\"", u32::MAX, u32::MAX);
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .expect("inputs");
+    let inputs =
+        inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
     let result =
         interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    let expected =
-        acvm::FieldValue::try_from_biguint(u128::from(u64::MAX).into(), validated.field_id)
-            .expect("u64::MAX is below the bn254 modulus");
-    assert_eq!(result, Value::Field(expected));
+    // The `Field` is `u64::MAX`, returned as its eight little-endian bytes.
+    let byte = Value::Int(IntValue::canonical(false, 8, BigInt::from(0xffu8)));
+    assert_eq!(result, Value::Array(vec![byte; 8]));
 }
 
+/// Integers whose values reach the Goldilocks modulus are entry-point types under every field,
+/// since inputs and returns are read as bytes: a `u128` input of `2^65`, and `i64` inputs and
+/// returns.
 #[test]
-fn goldilocks_refuses_an_entry_point_integer_that_can_reach_its_modulus() {
-    for name in [
-        "interp_inputs_i64",
-        "interp_return_i64",
-        "neg_wide_input_u128",
+fn wide_entry_point_integers_run_under_every_field() {
+    for (name, expected) in [
+        (
+            "interp_inputs_u128",
+            IntValue::canonical(false, 128, BigInt::from(1u8) << 65usize),
+        ),
+        (
+            "interp_inputs_i64",
+            IntValue::canonical(true, 64, BigInt::from(-4294967296i64)),
+        ),
+        (
+            "interp_return_i64",
+            IntValue::canonical(true, 64, BigInt::from(-1)),
+        ),
     ] {
-        let project = NoirProject::new(fixture(name)).expect("project");
-        assert!(
-            compile_for_validation(&project, FieldId::Bn254).is_ok(),
-            "{name}: bn254 takes this entry point"
-        );
-        let error = match compile_for_validation(&project, FieldId::Goldilocks) {
-            Ok(_) => panic!("{name}: this entry point must not compile under Goldilocks"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("Invalid type found in the entry point to a program"),
-            "{name}: {error}"
-        );
-        assert!(
-            error
-                .detail()
-                .contains("bits are not valid entry point types under goldilocks"),
-            "{name}: refused by the lowerable rule rather than the modulus one: {}",
-            error.detail()
+        assert_fixture_return(name, Value::Int(expected));
+    }
+}
+
+/// A tuple or struct pattern parameter takes the whole argument, though the monomorphizer gives
+/// the function one parameter per leaf of the pattern: `sum` gets `1 + 2`, `swap` returns `(1, 3)`
+/// and the one-field `first` reads `5`, so `main` returns `9`.
+#[test]
+fn pattern_parameters_take_the_whole_argument() {
+    let source = "
+        struct Pair { a: u8, b: u8 }
+        struct One { inner: (u8, u8) }
+        fn sum(Pair { a, b }: Pair) -> u8 { a + b }
+        fn swap((x, y): (u8, u8)) -> (u8, u8) { (y, x) }
+        fn first(One { inner }: One) -> u8 { inner.0 }
+        fn main(x: u8) -> pub u8 {
+            let (s, t) = swap((sum(Pair { a: x, b: 2 }), 1));
+            s + t + first(One { inner: (5, 6) })
+        }
+    ";
+    let one = Value::Int(IntValue::canonical(false, 8, BigInt::from(1)));
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_source(source, field);
+        let result = interpret_with_inputs(&validated.program, vec![one.clone()], field)
+            .unwrap_or_else(|error| panic!("{field}: {error}"));
+        assert_eq!(
+            result,
+            Value::Int(IntValue::canonical(false, 8, BigInt::from(9))),
+            "{field}"
         );
     }
 }
@@ -626,13 +626,7 @@ fn interprets_program_with_inputs() {
     let toml = std::fs::read_to_string(root.join("Prover.toml")).unwrap();
     for field in [FieldId::Bn254, FieldId::Goldilocks] {
         let validated = compile_for_validation(&project, field).unwrap();
-        let inputs = inputs_from_prover_toml(
-            &validated.program,
-            &validated.abi,
-            &toml,
-            validated.field_id,
-        )
-        .unwrap();
+        let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, &toml).unwrap();
 
         let result = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
         assert_eq!(result, Value::Unit, "{field}");
@@ -640,7 +634,7 @@ fn interprets_program_with_inputs() {
 }
 
 /// Differential correctness: the interpreter's computed return value matches the expected output
-/// Noir's corpus records in `Prover.toml`. `arithmetic_binary_operations` returns the `Field` 10
+/// Noir's corpus records in `Prover.toml`. `arithmetic_binary_operations` returns the `u8` 10
 /// under both fields, so this verifies the actual value, not merely that interpretation didn't
 /// error.
 #[test]
@@ -659,22 +653,11 @@ fn interpreter_return_matches_recorded_expected() {
     let toml = std::fs::read_to_string(root.join("Prover.toml")).unwrap();
     for field in [FieldId::Bn254, FieldId::Goldilocks] {
         let validated = compile_for_validation(&project, field).unwrap();
-        let inputs = inputs_from_prover_toml(
-            &validated.program,
-            &validated.abi,
-            &toml,
-            validated.field_id,
-        )
-        .unwrap();
+        let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, &toml).unwrap();
         let value = interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap();
-        let expected = expected_return_from_prover_toml(
-            &validated.program,
-            &validated.abi,
-            &toml,
-            validated.field_id,
-        )
-        .unwrap()
-        .expect("this program records a return value");
+        let expected = expected_return_from_prover_toml(&validated.program, &validated.abi, &toml)
+            .unwrap()
+            .expect("this program records a return value");
 
         assert_eq!(
             value, expected,
@@ -696,8 +679,8 @@ fn interprets_integer_widths() {
         (128, 16),
         (16384, 16),
     ] {
-        // Every width fixture takes `u8` inputs and returns a `u8`: an entry point carries only
-        // the lowerable integer types, so the width under test lives in a helper.
+        // Every width fixture takes `u8` inputs and returns a `u8`; the width under test lives in
+        // a helper.
         assert_fixture_return(
             &format!("interp_width_{bits}"),
             Value::Int(IntValue::canonical(false, 8, BigInt::from(returned))),
@@ -778,19 +761,6 @@ fn interprets_stdlib_fixtures() {
     }
 }
 
-#[test]
-fn bn254_accepts_input_above_the_goldilocks_modulus() {
-    assert_fixture_return_under(
-        FieldId::Bn254,
-        "neg_wide_input_u128",
-        Value::Int(IntValue::canonical(
-            false,
-            128,
-            BigInt::from(1u8) << 65usize,
-        )),
-    );
-}
-
 /// Noir's benchmark mode compiles the field-generic twins of `Field::lt` and the wrapping ops on
 /// bn254; they compute the same values as the bn254 halves, which `interprets_stdlib_fixtures`
 /// pins.
@@ -817,12 +787,19 @@ fn generic_builtins_select_the_limb_hash_on_bn254() {
     const MULTIPLIER: u64 = 0x1_0000_0001_b3;
     // `main` hashes `x + 2^32` with `Prover.toml`'s `x = 7`.
     let wide: u64 = 7 + (1 << 32);
+    // `main` returns the hash as eight little-endian bytes.
     let hash_under = |field: FieldId, generic_builtins: bool| {
         let (value, recorded) = run_fixture_with(field, "interp_generic_twins", generic_builtins);
-        let Value::Field(element) = &value else {
+        let Value::Array(bytes) = &value else {
             panic!("{value:?}")
         };
-        let element = element.as_biguint().clone();
+        let element = bytes
+            .iter()
+            .rev()
+            .fold(BigUint::ZERO, |hash, byte| match byte {
+                Value::Int(byte) => (hash << 8u8) + byte.value.to_biguint().expect("a byte"),
+                other => panic!("{other:?}"),
+            });
         (element, recorded == Some(value))
     };
     let (one_write, recorded_agrees) = hash_under(FieldId::Bn254, false);
@@ -891,31 +868,14 @@ fn finite_recursion_at_the_call_limit_is_a_coverage_gap() {
     );
 }
 
-/// An entry point carries only the integer types the circuit backend lowers, under every field:
-/// `u24` is legal inside a program and refused on `main`.
+/// An entry point takes an integer of any width from 2 to 16384 bits, under every field: `u24`
+/// is no width a circuit backend lowers natively.
 #[test]
-fn the_entry_point_takes_only_lowerable_integer_types() {
-    let project = NoirProject::new(negative_fixture("entry_width_u24")).expect("project");
-    for field in [FieldId::Bn254, FieldId::Goldilocks] {
-        let error = match compile_for_validation(&project, field) {
-            Ok(_) => panic!("{field}: a u24 entry point must not compile"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .summary()
-                .contains("Invalid type found in the entry point to a program"),
-            "{field}: {}",
-            error.summary()
-        );
-        assert!(
-            error.detail().contains(
-                "Integers the circuit backend does not lower are not valid entry point types. Found: u24"
-            ),
-            "{field}: {}",
-            error.detail()
-        );
-    }
+fn the_entry_point_takes_any_integer_width() {
+    assert_fixture_return(
+        "interp_entry_width_u24",
+        Value::Int(IntValue::canonical(false, 24, BigInt::from(8))),
+    );
 }
 
 // --- Differential oracle: interpreter vs Noir's own ACVM/Brillig executor (see `noir_oracle.rs`).
@@ -1092,10 +1052,8 @@ fn oracle_compare(program_dir: &Path) -> String {
         let validated = compile_for_validation(&project, FieldId::linked())
             .map_err(|e| (compile_error_of(&e).kind, e.to_string()))?;
         let inputs = match &prover_src {
-            Some(src) => {
-                inputs_from_prover_toml(&validated.program, &validated.abi, src, validated.field_id)
-                    .map_err(|e| (comparable_error_of(&e).kind, e.to_string()))?
-            }
+            Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
+                .map_err(|e| (comparable_error_of(&e).kind, e.to_string()))?,
             None => Vec::new(),
         };
         let value = interpret_with_inputs(&validated.program, inputs, validated.field_id)
@@ -1130,7 +1088,7 @@ fn oracle_compare(program_dir: &Path) -> String {
                         Err(e) => return format!("oracle-errored: {e}"),
                     };
                     match validated.abi.return_type.as_ref() {
-                        Some(r) => match crate::input::value_from_input(
+                        Some(r) => match super::noir_oracle::value_from_input(
                             &iv,
                             &r.abi_type,
                             ret_ty,
@@ -1151,14 +1109,9 @@ fn oracle_compare(program_dir: &Path) -> String {
             // interpreter that matches ground truth while the executor doesn't is an oracle
             // limitation, bucketed apart so it doesn't fail the gate.
             let recorded = prover_src.as_deref().and_then(|src| {
-                super::expected_return_from_prover_toml(
-                    &validated.program,
-                    &validated.abi,
-                    src,
-                    validated.field_id,
-                )
-                .ok()
-                .flatten()
+                super::expected_return_from_prover_toml(&validated.program, &validated.abi, src)
+                    .ok()
+                    .flatten()
             });
             match recorded {
                 Some(gt) if interp_value == gt && oracle_value != gt => {
@@ -1229,7 +1182,10 @@ fn oracle_survey_execution_success() {
     let mut buckets: BTreeMap<String, usize> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
     let mut total = 0;
-    for program in list_programs(&corpus).iter().filter(|p| !p.workspace) {
+    for program in list_programs(&corpus)
+        .iter()
+        .filter(|p| !p.workspace && !p.skipped)
+    {
         let name = &program.name;
         total += 1;
         let result = oracle_compare(&program.dir);

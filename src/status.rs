@@ -36,39 +36,12 @@ fn dump_path(tag: &str) -> PathBuf {
     dump_dir().join(format!("{tag}.json"))
 }
 
-/// Programs whose entry point, inputs, recorded return, constants or casts to `Field` need a field
-/// property; a side whose field lacks it cannot run them. An entry point is tagged by the widest
-/// integer type it takes or returns, which the compiler refuses under a field whose modulus that
-/// type's values can reach. An entry whose row is not `predicted` is stale.
+/// Programs whose constants or casts to `Field` need a field property; a side whose field lacks it
+/// cannot compile them. A cast is tagged by the widest integer type it converts, which the compiler
+/// refuses under a field whose modulus that type's values can reach. An entry whose row is not
+/// `predicted` is stale.
 const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
     ("bench_2_to_17", &[Capability::FieldBitsAtLeast(254)]),
-    ("bit_shifts_comptime", &[Capability::UnsignedFits(64)]),
-    (
-        "bit_shifts_runtime",
-        &[Capability::SignedFits(64), Capability::UnsignedFits(64)],
-    ),
-    ("bit_shifts_u128", &[Capability::UnsignedFits(128)]),
-    (
-        "brillig_block_parameter_liveness",
-        &[Capability::UnsignedFits(64)],
-    ),
-    ("cast_regression_7776", &[Capability::UnsignedFits(64)]),
-    (
-        "lambda_taking_lambda_regression_8543",
-        &[Capability::SignedFits(64)],
-    ),
-    (
-        "lambda_taking_lambda_with_variant",
-        &[Capability::SignedFits(64)],
-    ),
-    (
-        "large_nested_array_merge_loop",
-        &[Capability::UnsignedFits(64)],
-    ),
-    (
-        "large_nested_array_multi_field_merge_u64",
-        &[Capability::UnsignedFits(64)],
-    ),
     (
         "no_predicates_numeric_generic_poseidon",
         &[Capability::FieldBitsAtLeast(254)],
@@ -82,17 +55,10 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         &[Capability::FieldBitsAtLeast(254)],
     ),
     ("regression_10180", &[Capability::FieldBitsAtLeast(254)]),
-    ("regression_11294", &[Capability::FieldBitsAtLeast(254)]),
-    ("regression_12472", &[Capability::UnsignedFits(64)]),
     ("regression_5252", &[Capability::FieldBitsAtLeast(254)]),
     ("regression_5615", &[Capability::FieldBitsAtLeast(254)]),
-    ("regression_7962", &[Capability::UnsignedFits(64)]),
-    ("regression_8009", &[Capability::SignedFits(64)]),
-    ("regression_8261", &[Capability::FieldBitsAtLeast(254)]),
     ("regression_8519", &[Capability::UnsignedFits(128)]),
-    ("regression_8726", &[Capability::SignedFits(64)]),
     ("regression_8755", &[Capability::FieldBitsAtLeast(254)]),
-    ("regression_9544", &[Capability::UnsignedFits(64)]),
     ("regression_9888", &[Capability::FieldBitsAtLeast(254)]),
     (
         "regression_brillig_const_fold_self_dedup",
@@ -110,28 +76,11 @@ const PROGRAM_CAPABILITIES: &[(&str, &[Capability])] = &[
         "regression_unused_nested_array_get",
         &[Capability::FieldBitsAtLeast(254)],
     ),
-    (
-        "shift_left_rhs_value_casted_from_smaller_type",
-        &[Capability::UnsignedFits(64)],
-    ),
-    ("signed_truncation", &[Capability::SignedFits(64)]),
-    ("to_bytes_integration", &[Capability::FieldBitsAtLeast(254)]),
-    ("u128_type", &[Capability::UnsignedFits(128)]),
     ("uhashmap", &[Capability::FieldBitsAtLeast(254)]),
-    ("unsigned_to_signed_cast", &[Capability::UnsignedFits(64)]),
-    ("fixtures/interp_inputs_i64", &[Capability::SignedFits(64)]),
-    (
-        "fixtures/interp_inputs_u64",
-        &[Capability::UnsignedFits(64)],
-    ),
-    ("fixtures/interp_return_i64", &[Capability::SignedFits(64)]),
+    ("unsafe_range_constraint", &[Capability::UnsignedFits(64)]),
     (
         "fixtures/neg_interp_cast_u64_to_field",
         &[Capability::UnsignedFits(64)],
-    ),
-    (
-        "fixtures/neg_wide_input_u128",
-        &[Capability::UnsignedFits(128)],
     ),
 ];
 
@@ -232,6 +181,27 @@ const KNOWN_FIELD_DEPENDENT: &[(&str, &str)] = &[
         "requests 32 Field bytes, exceeding the Goldilocks byte length",
     ),
     (
+        "regression_9208",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "regression_9303",
+        "requests 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "to_bytes_integration",
+        "requests 31 and 32 Field bytes, exceeding the Goldilocks byte length",
+    ),
+    (
+        "cast_regression_7776",
+        "returns a Field difference cast to u64, whose wrapped value is the field's own",
+    ),
+    (
+        "fixtures/interp_generic_twins",
+        "returns the bytes of a u64 hash that bn254 writes in one element and the field-generic \
+         twin in two limbs",
+    ),
+    (
         "vectors",
         "requests 32 Field bytes, exceeding the Goldilocks byte length",
     ),
@@ -322,40 +292,20 @@ fn divergence_is_allowlistable(a: &DiffOutcome, b: &DiffOutcome) -> bool {
     !is_hard_failure(a) && !is_hard_failure(b)
 }
 
-/// Whether `field` refused the program for its width: an input above the modulus, or compile errors
-/// that are all entry-point integers too wide for it, constants it cannot hold or casts to `Field`.
-fn is_field_refusal(error: &ComparableError, detail: &str, field: FieldConfig) -> bool {
-    match &error.kind {
-        FailureKind::InputError => error
-            .payload
-            .contains(&format!("exceeds the {} field modulus", field.id())),
-        FailureKind::CompileError => {
-            let entry_errors = error
-                .payload
-                .matches("Invalid type found in the entry point to a program")
-                .count();
-            let width_errors = detail
-                .matches(&format!(
-                    " bits are not valid entry point types under {}",
-                    field.id()
-                ))
-                .count();
-            entry_errors == width_errors
-                && error.payload.split(" | ").enumerate().all(|(i, message)| {
-                    message == "Invalid type found in the entry point to a program"
-                        || message.starts_with("The value ")
-                            && message.contains(" cannot fit into `Field` which has range ")
-                        || message.starts_with("Values of type ")
-                            && message.contains(" can exceed the field modulus, so ")
-                            && message.ends_with(" cannot be cast to Field")
-                        || message.ends_with(" is outside the range of the Field type")
-                        || i > 0
-                            && message.starts_with("... and ")
-                            && message.contains(" more (sha256=")
-                })
-        }
-        _ => false,
-    }
+/// Whether the field refused the program for its size: compile errors that are all constants it
+/// cannot hold or casts to `Field`. Entry-point inputs and returns are field-free, so the field
+/// refuses none of them.
+fn is_field_refusal(error: &ComparableError) -> bool {
+    matches!(error.kind, FailureKind::CompileError)
+        && error.payload.split(" | ").enumerate().all(|(i, message)| {
+            message.starts_with("The value ")
+                && message.contains(" cannot fit into `Field` which has range ")
+                || message.starts_with("Values of type ")
+                    && message.contains(" can exceed the field modulus, so ")
+                    && message.ends_with(" cannot be cast to Field")
+                || message.ends_with(" is outside the range of the Field type")
+                || i > 0 && message.starts_with("... and ") && message.contains(" more (sha256=")
+        })
 }
 
 /// The two fields being compared, in the order `classify` takes their outcomes.
@@ -370,13 +320,13 @@ fn classify(name: &str, a: &DiffOutcome, b: &DiffOutcome, sides: &Sides) -> Verd
     match outcomes_equivalent(a, b) {
         Err(_) => {
             let refusing_side = match (a, b) {
-                (DiffOutcome::Returned(_), DiffOutcome::Errored { error, detail })
-                    if is_field_refusal(error, detail, sides.b) =>
+                (DiffOutcome::Returned(_), DiffOutcome::Errored { error, .. })
+                    if is_field_refusal(error) =>
                 {
                     Some(sides.b)
                 }
-                (DiffOutcome::Errored { error, detail }, DiffOutcome::Returned(_))
-                    if is_field_refusal(error, detail, sides.a) =>
+                (DiffOutcome::Errored { error, .. }, DiffOutcome::Returned(_))
+                    if is_field_refusal(error) =>
                 {
                     Some(sides.a)
                 }
@@ -512,16 +462,16 @@ fn render_status(provenance: &DumpProvenance, rows: &[Row]) -> String {
         "# Status\n\n\
          Every program of Noir's `execution_success` corpus and this crate's fixtures, compiled \
          and interpreted under both fields at the pinned compiler revision. `compile`, `run` and \
-         `return` are the frontend, the interpreter and the check against the `return` recorded in \
-         `Prover.toml` (exact under bn254; `Field` values ignored under goldilocks, whose corpus \
-         records bn254 values): ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two sides: \
-         `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field \
-         property the program's entry point, inputs, recorded return, constants or casts need; `field-dependent`, \
-         allowlisted as field-dependent by design; `both-sides`, neither side ran it; `unexpected`, a one-sided \
-         gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest. \
-         `AST` says whether both monomorphized programs project to the same hash. `Record` \
-         fingerprints the row's underlying records, so any change shows here even when the glyphs \
-         do not. Regenerate with `make status`; CI fails when a fresh run differs.\n\n",
+         `return` are the frontend, the interpreter and the exact check against the `return` \
+         recorded in `Prover.toml`: ✅ passed, ❌ failed, ➖ not run. `Fields` compares the two \
+         sides: `equal`; `equal*`, only `Field` values differ; `predicted`, one side lacks a field \
+         property the program's constants or casts need; `field-dependent`, allowlisted as \
+         field-dependent by design; `both-sides`, neither side ran it; `unexpected`, a one-sided \
+         gap nothing predicts; `divergence`, different results; `not run`, a workspace manifest \
+         or a program listed in `test_programs/provekit_skipped.txt`. `AST` says whether both \
+         monomorphized programs project to the same hash. `Record` fingerprints the row's \
+         underlying records, so any change shows here even when the glyphs do not. Regenerate \
+         with `make status`; CI fails when a fresh run differs.\n\n",
     );
     let fixtures = rows
         .iter()
@@ -659,7 +609,7 @@ fn swept_field() -> FieldId {
 
 /// `make sweep FIELD=<field>`: record the corpus and the fixtures under `FIELD` into
 /// `target/status/<field>.json`. One build sweeps every field whose elements its linked element
-/// can hold, since the compiler and the ABI parser both take the field at run time.
+/// can hold, since the compiler takes the field at run time and the input codec takes none.
 #[test]
 #[ignore = "status: run `make sweep FIELD=<field>`"]
 fn dump_records() {
@@ -928,52 +878,40 @@ mod tests {
     }
 
     #[test]
-    fn width_refusals_are_a_predicted_gap_only_under_a_tag() {
-        let rejected = errored(
-            FailureKind::InputError,
-            "failed to parse Prover.toml: Value 123 exceeds the goldilocks field modulus",
-        );
-        let width_detail = "Integers wider than 63 bits are not valid entry point types under goldilocks. Found: u128";
-        let refused = errored_with_detail(
-            FailureKind::CompileError,
-            "Invalid type found in the entry point to a program",
-            width_detail,
-        );
-        for gap in [&rejected, &refused] {
-            assert_eq!(
-                verdict("bit_shifts_u128", &returned("1"), gap),
-                Verdict::PredictedGap
-            );
-            assert_eq!(verdict("p", &returned("1"), gap), Verdict::Divergence);
-            assert_eq!(
-                verdict("bit_shifts_u128", gap, &returned("1")),
-                Verdict::Divergence
-            );
-        }
+    fn field_refusals_are_a_predicted_gap_only_under_a_tag() {
+        let cast =
+            "Values of type u128 can exceed the field modulus, so they cannot be cast to Field";
+        let cast_refused = errored(FailureKind::CompileError, cast);
         let many_field_errors = errored(
             FailureKind::CompileError,
             "The value `99` cannot fit into `Field` which has range `0..7` | ... and 9 more (sha256=abc)",
         );
-        assert_eq!(
-            verdict("bench_2_to_17", &returned("1"), &many_field_errors),
-            Verdict::PredictedGap
-        );
-        let unrelated_after_width = errored_with_detail(
-            FailureKind::CompileError,
-            "Invalid type found in the entry point to a program | Unknown name",
-            width_detail,
-        );
+        for gap in [&cast_refused, &many_field_errors] {
+            assert_eq!(
+                verdict("regression_8519", &returned("1"), gap),
+                Verdict::PredictedGap
+            );
+            assert_eq!(verdict("p", &returned("1"), gap), Verdict::Divergence);
+            assert_eq!(
+                verdict("regression_8519", gap, &returned("1")),
+                Verdict::Divergence
+            );
+        }
+        // Entry-point types and inputs are field-free, so neither is a field refusal.
         for error in [
             errored(FailureKind::CompileError, "Unknown name"),
+            errored(FailureKind::CompileError, &format!("{cast} | Unknown name")),
             errored(
                 FailureKind::CompileError,
                 "Invalid type found in the entry point to a program",
             ),
-            unrelated_after_width,
-            errored(FailureKind::InputError, "missing parameter"),
+            errored(
+                FailureKind::InputError,
+                "failed to parse Prover.toml: Value 123 exceeds the goldilocks field modulus",
+            ),
         ] {
             assert_eq!(
-                verdict("bit_shifts_u128", &returned("1"), &error),
+                verdict("regression_8519", &returned("1"), &error),
                 Verdict::Divergence
             );
         }
@@ -981,43 +919,24 @@ mod tests {
 
     /// The refusals the pipeline records under Goldilocks are the ones `is_field_refusal` knows.
     #[test]
-    fn recorded_width_refusals_are_recognized() {
-        let goldilocks = FieldConfig::new(FieldId::Goldilocks);
-        for (source, toml) in [
-            (
-                "fn main(x: Field) -> pub Field { x }",
-                format!("x = \"{}\"", goldilocks.modulus()),
-            ),
-            ("fn main(x: u64) -> pub u64 { x }", String::new()),
-            (
-                "struct S { a: i64 } fn main(s: S) -> pub bool { s.a == 0 }",
-                String::new(),
-            ),
-            (
-                "fn main(x: u32) -> pub Field { (x as u64) as Field }",
-                String::new(),
-            ),
-            (
-                "fn main() -> pub Field { 18446744069414584321 }",
-                String::new(),
-            ),
+    fn field_refusals_are_recognized() {
+        for source in [
+            "fn main(x: u32) -> pub bool { ((x as u64) as Field) == 0 }",
+            "fn main() -> pub bool { let x: Field = 18446744069414584321; x == 0 }",
         ] {
             let root = crate::corpus::temp_noir_package("refused", source);
-            std::fs::write(root.path().join("Prover.toml"), toml).unwrap();
             let program = CorpusProgram {
                 name: "refused".to_string(),
                 dir: root.path().to_path_buf(),
                 workspace: false,
+                skipped: false,
                 source_hash: "unhashed".to_string(),
             };
             let outcome = run_record(&program, FieldId::Goldilocks).outcome();
             let DiffOutcome::Errored { error, detail } = &outcome else {
                 panic!("{source}: Goldilocks must refuse it, got {outcome:?}");
             };
-            assert!(
-                is_field_refusal(error, detail, goldilocks),
-                "{source}: {error}\n{detail}"
-            );
+            assert!(is_field_refusal(error), "{source}: {error}\n{detail}");
         }
     }
 
@@ -1139,16 +1058,17 @@ mod tests {
         let sides = sides();
         let ok = record(Some(DiffValue::Unit), "1");
         let mut rejected = record(None, "1");
-        rejected.interpret = StepOutcome::failed(
+        rejected.compile = StepOutcome::failed(
             ComparableError::new(
-                FailureKind::InputError,
-                "Value 123 exceeds the goldilocks field modulus",
+                FailureKind::CompileError,
+                "Values of type u128 can exceed the field modulus, so they cannot be cast to Field",
             ),
             "",
         );
+        rejected.interpret = StepOutcome::not_run("not compiled");
         let rows = [
             row("modulus", &ok, &ok, &sides),
-            row("bit_shifts_u128", &ok, &rejected, &sides),
+            row("regression_8519", &ok, &rejected, &sides),
         ];
         let violations = invariant_violations(&rows);
         assert!(
@@ -1156,7 +1076,7 @@ mod tests {
             "{violations:?}"
         );
         assert!(
-            !violations.iter().any(|v| v.starts_with("bit_shifts_u128:")),
+            !violations.iter().any(|v| v.starts_with("regression_8519:")),
             "{violations:?}"
         );
         assert!(

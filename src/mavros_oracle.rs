@@ -91,7 +91,7 @@ impl Record {
 }
 
 /// The ABI input value that declares `value` as a return of `typ` in `field`: the inverse of the
-/// interpreter's input bridge, so Mavros can check its own result against the interpreter's.
+/// field-element bridge, so Mavros can check its own result against the interpreter's.
 fn input_from_value(
     value: &Value,
     typ: &AbiType,
@@ -244,7 +244,7 @@ fn examine(
     // The interpreter on the program Mavros lowers, with Mavros's stdlib replacements in it.
     let interp = caught(|| {
         let inputs = match &prover_toml {
-            Some(src) => inputs_from_prover_toml(program, &abi, src, field)?,
+            Some(src) => inputs_from_prover_toml(program, &abi, src)?,
             None => Vec::new(),
         };
         interpret_with_inputs(program, inputs, field)
@@ -269,7 +269,7 @@ fn examine(
         // `Prover.toml` records the native builtins' result, which their generic twins can change.
         _ if generic_builtins => "not-compared".into(),
         (Some(src), Ok(value)) => {
-            match caught(|| expected_return_from_prover_toml(program, &abi, src, field)) {
+            match caught(|| expected_return_from_prover_toml(program, &abi, src)) {
                 Ok(Ok(Some(recorded))) if recorded == *value => "agrees".into(),
                 Ok(Ok(Some(recorded))) => {
                     format!("differs: recorded {}", line(format!("{recorded:?}")))
@@ -317,8 +317,8 @@ fn examine(
     };
     record.mavros_compile = "ok".into();
 
-    // The parameters only: a recorded `return` the field cannot hold must not stop the run, as
-    // the interpreter's own input bridge has it.
+    // Mavros reads field elements: the parameters only, so a recorded `return` the field cannot
+    // hold does not stop the run.
     let parameters_only = Abi {
         return_type: None,
         ..abi.clone()
@@ -716,10 +716,10 @@ fn sweep() {
     println!("  report: {}", report.display());
 }
 
-/// `input_from_value` is the inverse of the interpreter's input bridge: every shape a return
-/// can take reads back as the value it declared, struct fields in declaration order.
+/// `input_from_value` is the inverse of the field-element bridge: every shape a return can take
+/// reads back as the value it declared, struct fields in declaration order.
 #[test]
-fn a_declared_return_reads_back_through_the_input_bridge() {
+fn a_declared_return_reads_back_through_the_field_element_bridge() {
     for field in [FieldId::Bn254, FieldId::Goldilocks] {
         assert_declared_return_round_trip(field);
     }
@@ -727,7 +727,7 @@ fn a_declared_return_reads_back_through_the_input_bridge() {
 
 fn assert_declared_return_round_trip(field: FieldId) {
     use super::IntValue;
-    use super::input::value_from_input;
+    use super::noir_oracle::value_from_input;
     use acvm::FieldValue;
     use noirc_abi::Sign;
     use noirc_frontend::monomorphization::ast::Type;
@@ -859,13 +859,7 @@ fn pure_noir_value(root: &Path, field: FieldId, generic_builtins: bool) -> Value
     let toml = std::fs::read_to_string(root.join("Prover.toml")).unwrap_or_default();
     let noir = NoirProject::new(root.to_path_buf()).unwrap();
     let validated = compile_for_validation_with(&noir, field, generic_builtins).unwrap();
-    let inputs = inputs_from_prover_toml(
-        &validated.program,
-        &validated.abi,
-        &toml,
-        validated.field_id,
-    )
-    .unwrap();
+    let inputs = inputs_from_prover_toml(&validated.program, &validated.abi, &toml).unwrap();
     interpret_with_inputs(&validated.program, inputs, validated.field_id).unwrap()
 }
 

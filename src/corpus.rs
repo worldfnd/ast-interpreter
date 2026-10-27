@@ -1,5 +1,6 @@
 //! Corpus loading, source hashes, provenance, and per-step run records.
 
+use std::collections::BTreeSet;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +22,10 @@ use super::{
 };
 
 const CORPUS_SUBDIR: &str = "test_programs/execution_success";
+
+/// The fork's list of test programs its test generators skip, one `<category>/<program>` per line,
+/// beside the category directories.
+const SKIP_LIST: &str = "provekit_skipped.txt";
 
 pub(crate) fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -70,27 +75,50 @@ pub(crate) struct CorpusProgram {
     pub dir: PathBuf,
     /// `Nargo.toml` declares a workspace; the interpreter runs single-package programs only.
     pub workspace: bool,
+    /// The fork's skip list names the program, so the interpreter does not run it either.
+    pub skipped: bool,
     pub source_hash: String,
 }
 
 /// Every directory under `root` with a `Nargo.toml`, in name order.
 pub(crate) fn list_programs(root: &Path) -> Vec<CorpusProgram> {
+    let skipped = skipped_programs(root);
     let mut programs: Vec<CorpusProgram> = std::fs::read_dir(root)
         .unwrap_or_else(|e| panic!("cannot read the program directory {}: {e}", root.display()))
         .map(|entry| entry.expect("program directory entry").path())
         .filter(|dir| dir.is_dir() && dir.join("Nargo.toml").is_file())
         .map(|dir| {
             let manifest = std::fs::read_to_string(dir.join("Nargo.toml")).unwrap_or_default();
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
             CorpusProgram {
-                name: dir.file_name().unwrap().to_string_lossy().into_owned(),
                 workspace: manifest.contains("[workspace]"),
+                skipped: skipped.contains(&name),
                 source_hash: source_hash(&dir),
+                name,
                 dir,
             }
         })
         .collect();
     programs.sort_by(|a, b| a.name.cmp(&b.name));
     programs
+}
+
+/// The programs under `root` that the skip list beside it names: its lines whose category is the
+/// name of `root`. Comments and blank lines are ignored.
+fn skipped_programs(root: &Path) -> BTreeSet<String> {
+    let (Some(category), Some(parent)) = (root.file_name(), root.parent()) else {
+        return BTreeSet::new();
+    };
+    let Ok(list) = std::fs::read_to_string(parent.join(SKIP_LIST)) else {
+        return BTreeSet::new();
+    };
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('/'))
+        .filter(|(line_category, _)| category.to_str() == Some(*line_category))
+        .map(|(_, program)| program.to_string())
+        .collect()
 }
 
 /// SHA-256 over the git-tracked files under `dir`, as `/`-separated relative path, length and
@@ -378,12 +406,17 @@ fn normalize_step(step: StepOutcome, roots: &[(PathBuf, &str)]) -> StepOutcome {
 
 /// Run in place so path dependencies resolve; the sweep checks checkout cleanliness first.
 pub(crate) fn run_record(program: &CorpusProgram, field: FieldId) -> RunRecord {
-    if program.workspace {
+    let not_run = if program.workspace {
+        Some("workspace manifest: the interpreter runs single-package programs")
+    } else if program.skipped {
+        Some("listed in test_programs/provekit_skipped.txt")
+    } else {
+        None
+    };
+    if let Some(reason) = not_run {
         return RunRecord {
             source_hash: program.source_hash.clone(),
-            load: StepOutcome::not_run(
-                "workspace manifest: the interpreter runs single-package programs",
-            ),
+            load: StepOutcome::not_run(reason),
             compile: StepOutcome::not_run("not loaded"),
             interpret: StepOutcome::not_run("not compiled"),
             oracle: StepOutcome::not_run("not interpreted"),
@@ -461,10 +494,8 @@ fn run_steps(root: &Path, source_hash: String, field: FieldId) -> RunRecord {
     let prover_src = std::fs::read_to_string(root.join("Prover.toml")).ok();
     let interpreted = run_step(|| {
         let inputs = match &prover_src {
-            Some(src) => {
-                inputs_from_prover_toml(&validated.program, &validated.abi, src, validated.field_id)
-                    .map_err(|e| interpret_failure(&e))?
-            }
+            Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
+                .map_err(|e| interpret_failure(&e))?,
             None => Vec::new(),
         };
         let value = interpret_with_inputs(&validated.program, inputs, validated.field_id)
@@ -482,56 +513,39 @@ fn run_steps(root: &Path, source_hash: String, field: FieldId) -> RunRecord {
     record
 }
 
-/// Check the return against the `return` recorded in `Prover.toml`: exactly under bn254, with
-/// `Field` values ignored under every other field because the corpus records bn254's. A recorded
-/// return the parser refuses under this field, or one the input bridge does not decode, leaves the
-/// check not run.
+/// Check the return against the `return` recorded in `Prover.toml`, exactly: an entry point
+/// returns no `Field`, so the recorded value holds under every field. The inputs are read from the
+/// same document, so a refused recorded return has already failed the run.
 fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &DiffValue) -> StepOutcome {
     let Some(src) = prover_src else {
         return StepOutcome::not_run("no Prover.toml");
     };
     let recorded = run_step(|| {
-        expected_return_from_prover_toml(
-            &validated.program,
-            &validated.abi,
-            src,
-            validated.field_id,
-        )
-        .and_then(|expected| expected.as_ref().map(DiffValue::from_value).transpose())
-        .map_err(|e| interpret_failure(&e))
+        expected_return_from_prover_toml(&validated.program, &validated.abi, src)
+            .and_then(|expected| expected.as_ref().map(DiffValue::from_value).transpose())
+            .map_err(|e| interpret_failure(&e))
     });
     match recorded {
-        Err(StepOutcome::Failed { error, .. })
-            if matches!(
-                error.kind,
-                FailureKind::Unsupported { .. } | FailureKind::InputError
-            ) =>
-        {
-            StepOutcome::not_run(format!("recorded return: {}", error.payload))
-        }
         Err(step) => step,
         Ok(None) => StepOutcome::not_run("no recorded return"),
-        Ok(Some(expected)) => compare_with_recorded(actual, &expected, validated.field_id),
+        Ok(Some(expected)) => compare_with_recorded(actual, &expected),
     }
 }
 
-fn compare_with_recorded(actual: &DiffValue, expected: &DiffValue, field: FieldId) -> StepOutcome {
-    if let Err(reason) = values_equivalent(actual, expected) {
-        return StepOutcome::failed(
-            ComparableError::new(FailureKind::OracleMismatch, normalize_text(&reason)),
-            format!("interpreter returned {actual}"),
-        );
-    }
-    if field != FieldId::Bn254 || actual == expected {
-        StepOutcome::Passed
-    } else {
-        StepOutcome::failed(
+fn compare_with_recorded(actual: &DiffValue, expected: &DiffValue) -> StepOutcome {
+    match values_equivalent(actual, expected) {
+        Ok(()) if actual == expected => StepOutcome::Passed,
+        Ok(()) => StepOutcome::failed(
             ComparableError::new(
                 FailureKind::OracleMismatch,
                 "field value differs from the recorded return",
             ),
             format!("interpreter returned {actual}, recorded {expected}"),
-        )
+        ),
+        Err(reason) => StepOutcome::failed(
+            ComparableError::new(FailureKind::OracleMismatch, normalize_text(&reason)),
+            format!("interpreter returned {actual}"),
+        ),
     }
 }
 
@@ -581,6 +595,7 @@ mod tests {
             name: name.to_string(),
             dir: PathBuf::new(),
             workspace: false,
+            skipped: false,
             source_hash: hash.to_string(),
         };
         let base = [program("a", "1"), program("b", "2")];
@@ -682,11 +697,53 @@ mod tests {
         );
     }
 
+    /// The skip list beside a category names the programs of that category the interpreter does
+    /// not run; a line of another category, a comment or a blank line names none of them.
+    #[test]
+    fn the_programs_the_skip_list_names_are_not_run() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        let root = repo.path().join("execution_success");
+        for name in ["a", "b", "c"] {
+            write(&root.join(name), "Nargo.toml", "[package]");
+            write(&root.join(name), "src/main.nr", "fn main() {}");
+        }
+        write(
+            repo.path(),
+            SKIP_LIST,
+            "# A comment.\n\nexecution_success/b\ncompile_success_empty/c\n",
+        );
+        git(&["add", "-A"]);
+
+        let programs = list_programs(&root);
+        let skipped: Vec<_> = programs
+            .iter()
+            .map(|p| (p.name.as_str(), p.skipped))
+            .collect();
+        assert_eq!(skipped, [("a", false), ("b", true), ("c", false)]);
+        let record = run_record(&programs[1], FieldId::Bn254);
+        assert_eq!(
+            record.load,
+            StepOutcome::not_run("listed in test_programs/provekit_skipped.txt")
+        );
+        assert_eq!(record.compile, StepOutcome::not_run("not loaded"));
+    }
+
     fn fixture_program(name: &str) -> CorpusProgram {
         let dir = fixtures_dir().join(name);
         CorpusProgram {
             name: name.to_string(),
             workspace: false,
+            skipped: false,
             source_hash: source_hash(&dir),
             dir,
         }
@@ -733,41 +790,8 @@ mod tests {
         assert_eq!(record.oracle, StepOutcome::not_run("no recorded return"));
     }
 
-    /// bn254 records a return of `2^64`, which Goldilocks can hold neither as its result nor as a
-    /// recorded `Field`.
     #[test]
-    fn an_unrepresentable_recorded_return_leaves_the_return_check_not_run() {
-        let root = temp_noir_package(
-            "above_modulus",
-            "fn main(x: Field) -> pub Field { x * 4294967296 * 4294967296 }",
-        );
-        std::fs::write(
-            root.path().join("Prover.toml"),
-            "x = \"1\"\nreturn = \"18446744073709551616\"\n",
-        )
-        .unwrap();
-        let program = CorpusProgram {
-            name: "above_modulus".to_string(),
-            dir: root.path().to_path_buf(),
-            workspace: false,
-            source_hash: "unhashed".to_string(),
-        };
-
-        let bn254 = run_record(&program, FieldId::Bn254);
-        assert!(bn254.interpret.passed(), "{:?}", bn254.interpret);
-        assert!(bn254.oracle.passed(), "{:?}", bn254.oracle);
-
-        let goldilocks = run_record(&program, FieldId::Goldilocks);
-        assert!(goldilocks.interpret.passed(), "{:?}", goldilocks.interpret);
-        assert!(
-            matches!(&goldilocks.oracle, StepOutcome::NotRun { reason } if reason.starts_with("recorded return:")),
-            "{:?}",
-            goldilocks.oracle
-        );
-    }
-
-    #[test]
-    fn recorded_field_returns_are_compared_exactly_only_on_bn254() {
+    fn recorded_returns_are_compared_exactly() {
         let int = |v: u64| {
             DiffValue::from_value(&Value::Int(IntValue {
                 signed: false,
@@ -776,30 +800,11 @@ mod tests {
             }))
             .unwrap()
         };
-        assert!(compare_with_recorded(&int(7), &int(7), FieldId::linked()).passed());
-        let mismatch = compare_with_recorded(&int(7), &int(8), FieldId::linked());
+        assert!(compare_with_recorded(&int(7), &int(7)).passed());
+        let mismatch = compare_with_recorded(&int(7), &int(8));
         assert_eq!(
             mismatch.failure().map(|e| &e.kind),
             Some(&FailureKind::OracleMismatch)
         );
-
-        let field = |v: u64| {
-            DiffValue::from_value(&Value::Field(
-                acvm::FieldValue::try_from_biguint(u128::from(v).into(), FieldId::linked())
-                    .expect("the test values are below every modulus"),
-            ))
-            .unwrap()
-        };
-        // The corpus records bn254's `Field` values, so only a bn254 run compares them exactly.
-        assert_eq!(
-            compare_with_recorded(&field(1), &field(2), FieldId::Bn254)
-                .failure()
-                .map(|e| e.payload.as_str()),
-            Some("field value differs from the recorded return")
-        );
-        for other in FieldId::ALL.into_iter().filter(|id| *id != FieldId::Bn254) {
-            let differing = compare_with_recorded(&field(1), &field(2), other);
-            assert!(differing.passed(), "{other}: {differing:?}");
-        }
     }
 }

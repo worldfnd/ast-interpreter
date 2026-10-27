@@ -8,7 +8,8 @@ fn check_lt(x: Field, y: Field, expected: bool) {
     assert(hint == expected);
 }
 
-fn main(x: Field) -> pub bool {
+fn main() -> pub bool {
+    let x: Field = 41;
     check_lt(x, x, false);
     check_lt(x, x + 1, true);
     check_lt(x + 1, x, false);

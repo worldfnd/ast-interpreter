@@ -7,9 +7,8 @@ arrays, tuples, and structs. Cross-field comparisons ignore differences in `Fiel
 
 A `Field` value carries the field it belongs to, and the interpreter takes its field from the label
 the monomorphized program was compiled under, so one build runs a program under any supported
-field. The ABI input parser reads values in that field too; it holds them in the linked
-`acvm::FieldElement`, so a bn254 build parses bn254 and Goldilocks inputs alike. Only the ACVM
-executor oracle computes in the linked field, bn254.
+field. Entry-point inputs and returns are read through `noirc_abi::bytes`, whose values are the
+same under every field. Only the ACVM executor oracle computes in the linked field, bn254.
 
 ## Using it
 
@@ -21,9 +20,11 @@ ast-interpreter = { git = "https://github.com/worldfnd/ast-interpreter.git", rev
 Use `interpret` for self-checking programs with no inputs, or `interpret_with_inputs` when `main` takes
 arguments. Both take the `FieldId` the program was compiled under, which
 `MonomorphizationOutput::field_id` records. For `Prover.toml` inputs, use `inputs_from_prover_toml`
-and `expected_return_from_prover_toml`, which read the values in that field. Inputs built directly
-as `Value`s must follow the same rules: every `FieldValue` must belong to the program's field, and
-every `IntValue` must be a value of the width and signedness it declares.
+and `expected_return_from_prover_toml`; for the parameter blob a backend reads, use
+`inputs_from_bytes`. All three go through `noirc_abi::bytes`, so they read the same values under
+every field. Inputs built directly as `Value`s must be valid for the program: every `FieldValue`
+must belong to its field, and every `IntValue` must be a value of the width and signedness it
+declares.
 
 Crates that pass Noir AST values into this interpreter must use the same pinned `noirc_frontend` and
 `acvm` sources, spelled the same way. Cargo keys a git dependency on the URL *and* the reference, so
