@@ -1008,6 +1008,7 @@ mod tests {
                 name: "refused".to_string(),
                 dir: root.path().to_path_buf(),
                 workspace: false,
+                skipped: false,
                 source_hash: "unhashed".to_string(),
             };
             let outcome = run_record(&program, FieldId::Goldilocks).outcome();

@@ -1182,7 +1182,10 @@ fn oracle_survey_execution_success() {
     let mut buckets: BTreeMap<String, usize> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
     let mut total = 0;
-    for program in list_programs(&corpus).iter().filter(|p| !p.workspace) {
+    for program in list_programs(&corpus)
+        .iter()
+        .filter(|p| !p.workspace && !p.skipped)
+    {
         let name = &program.name;
         total += 1;
         let result = oracle_compare(&program.dir);

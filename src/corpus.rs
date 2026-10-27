@@ -1,5 +1,6 @@
 //! Corpus loading, source hashes, provenance, and per-step run records.
 
+use std::collections::BTreeSet;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +22,10 @@ use super::{
 };
 
 const CORPUS_SUBDIR: &str = "test_programs/execution_success";
+
+/// The fork's list of test programs its test generators skip, one `<category>/<program>` per line,
+/// beside the category directories.
+const SKIP_LIST: &str = "provekit_skipped.txt";
 
 pub(crate) fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -70,27 +75,50 @@ pub(crate) struct CorpusProgram {
     pub dir: PathBuf,
     /// `Nargo.toml` declares a workspace; the interpreter runs single-package programs only.
     pub workspace: bool,
+    /// The fork's skip list names the program, so the interpreter does not run it either.
+    pub skipped: bool,
     pub source_hash: String,
 }
 
 /// Every directory under `root` with a `Nargo.toml`, in name order.
 pub(crate) fn list_programs(root: &Path) -> Vec<CorpusProgram> {
+    let skipped = skipped_programs(root);
     let mut programs: Vec<CorpusProgram> = std::fs::read_dir(root)
         .unwrap_or_else(|e| panic!("cannot read the program directory {}: {e}", root.display()))
         .map(|entry| entry.expect("program directory entry").path())
         .filter(|dir| dir.is_dir() && dir.join("Nargo.toml").is_file())
         .map(|dir| {
             let manifest = std::fs::read_to_string(dir.join("Nargo.toml")).unwrap_or_default();
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
             CorpusProgram {
-                name: dir.file_name().unwrap().to_string_lossy().into_owned(),
                 workspace: manifest.contains("[workspace]"),
+                skipped: skipped.contains(&name),
                 source_hash: source_hash(&dir),
+                name,
                 dir,
             }
         })
         .collect();
     programs.sort_by(|a, b| a.name.cmp(&b.name));
     programs
+}
+
+/// The programs under `root` that the skip list beside it names: its lines whose category is the
+/// name of `root`. Comments and blank lines are ignored.
+fn skipped_programs(root: &Path) -> BTreeSet<String> {
+    let (Some(category), Some(parent)) = (root.file_name(), root.parent()) else {
+        return BTreeSet::new();
+    };
+    let Ok(list) = std::fs::read_to_string(parent.join(SKIP_LIST)) else {
+        return BTreeSet::new();
+    };
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('/'))
+        .filter(|(line_category, _)| category.to_str() == Some(*line_category))
+        .map(|(_, program)| program.to_string())
+        .collect()
 }
 
 /// SHA-256 over the git-tracked files under `dir`, as `/`-separated relative path, length and
@@ -378,12 +406,17 @@ fn normalize_step(step: StepOutcome, roots: &[(PathBuf, &str)]) -> StepOutcome {
 
 /// Run in place so path dependencies resolve; the sweep checks checkout cleanliness first.
 pub(crate) fn run_record(program: &CorpusProgram, field: FieldId) -> RunRecord {
-    if program.workspace {
+    let not_run = if program.workspace {
+        Some("workspace manifest: the interpreter runs single-package programs")
+    } else if program.skipped {
+        Some("listed in test_programs/provekit_skipped.txt")
+    } else {
+        None
+    };
+    if let Some(reason) = not_run {
         return RunRecord {
             source_hash: program.source_hash.clone(),
-            load: StepOutcome::not_run(
-                "workspace manifest: the interpreter runs single-package programs",
-            ),
+            load: StepOutcome::not_run(reason),
             compile: StepOutcome::not_run("not loaded"),
             interpret: StepOutcome::not_run("not compiled"),
             oracle: StepOutcome::not_run("not interpreted"),
@@ -562,6 +595,7 @@ mod tests {
             name: name.to_string(),
             dir: PathBuf::new(),
             workspace: false,
+            skipped: false,
             source_hash: hash.to_string(),
         };
         let base = [program("a", "1"), program("b", "2")];
@@ -663,11 +697,53 @@ mod tests {
         );
     }
 
+    /// The skip list beside a category names the programs of that category the interpreter does
+    /// not run; a line of another category, a comment or a blank line names none of them.
+    #[test]
+    fn the_programs_the_skip_list_names_are_not_run() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        let root = repo.path().join("execution_success");
+        for name in ["a", "b", "c"] {
+            write(&root.join(name), "Nargo.toml", "[package]");
+            write(&root.join(name), "src/main.nr", "fn main() {}");
+        }
+        write(
+            repo.path(),
+            SKIP_LIST,
+            "# A comment.\n\nexecution_success/b\ncompile_success_empty/c\n",
+        );
+        git(&["add", "-A"]);
+
+        let programs = list_programs(&root);
+        let skipped: Vec<_> = programs
+            .iter()
+            .map(|p| (p.name.as_str(), p.skipped))
+            .collect();
+        assert_eq!(skipped, [("a", false), ("b", true), ("c", false)]);
+        let record = run_record(&programs[1], FieldId::Bn254);
+        assert_eq!(
+            record.load,
+            StepOutcome::not_run("listed in test_programs/provekit_skipped.txt")
+        );
+        assert_eq!(record.compile, StepOutcome::not_run("not loaded"));
+    }
+
     fn fixture_program(name: &str) -> CorpusProgram {
         let dir = fixtures_dir().join(name);
         CorpusProgram {
             name: name.to_string(),
             workspace: false,
+            skipped: false,
             source_hash: source_hash(&dir),
             dir,
         }
