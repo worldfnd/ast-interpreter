@@ -40,7 +40,7 @@ pub use diff::{
     outcomes_equivalent, values_equivalent,
 };
 pub use error::InterpretError;
-pub use input::{expected_return_from_prover_toml, inputs_from_prover_toml};
+pub use input::{expected_return_from_prover_toml, inputs_from_bytes, inputs_from_prover_toml};
 pub use projection::{PROJECTION_VERSION, canonical_text, projection_hash};
 pub use value::{IntValue, Value};
 

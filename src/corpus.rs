@@ -461,10 +461,8 @@ fn run_steps(root: &Path, source_hash: String, field: FieldId) -> RunRecord {
     let prover_src = std::fs::read_to_string(root.join("Prover.toml")).ok();
     let interpreted = run_step(|| {
         let inputs = match &prover_src {
-            Some(src) => {
-                inputs_from_prover_toml(&validated.program, &validated.abi, src, validated.field_id)
-                    .map_err(|e| interpret_failure(&e))?
-            }
+            Some(src) => inputs_from_prover_toml(&validated.program, &validated.abi, src)
+                .map_err(|e| interpret_failure(&e))?,
             None => Vec::new(),
         };
         let value = interpret_with_inputs(&validated.program, inputs, validated.field_id)
@@ -482,56 +480,39 @@ fn run_steps(root: &Path, source_hash: String, field: FieldId) -> RunRecord {
     record
 }
 
-/// Check the return against the `return` recorded in `Prover.toml`: exactly under bn254, with
-/// `Field` values ignored under every other field because the corpus records bn254's. A recorded
-/// return the parser refuses under this field, or one the input bridge does not decode, leaves the
-/// check not run.
+/// Check the return against the `return` recorded in `Prover.toml`, exactly: an entry point
+/// returns no `Field`, so the recorded value holds under every field. The inputs are read from the
+/// same document, so a refused recorded return has already failed the run.
 fn oracle_step(validated: &Validated, prover_src: Option<&str>, actual: &DiffValue) -> StepOutcome {
     let Some(src) = prover_src else {
         return StepOutcome::not_run("no Prover.toml");
     };
     let recorded = run_step(|| {
-        expected_return_from_prover_toml(
-            &validated.program,
-            &validated.abi,
-            src,
-            validated.field_id,
-        )
-        .and_then(|expected| expected.as_ref().map(DiffValue::from_value).transpose())
-        .map_err(|e| interpret_failure(&e))
+        expected_return_from_prover_toml(&validated.program, &validated.abi, src)
+            .and_then(|expected| expected.as_ref().map(DiffValue::from_value).transpose())
+            .map_err(|e| interpret_failure(&e))
     });
     match recorded {
-        Err(StepOutcome::Failed { error, .. })
-            if matches!(
-                error.kind,
-                FailureKind::Unsupported { .. } | FailureKind::InputError
-            ) =>
-        {
-            StepOutcome::not_run(format!("recorded return: {}", error.payload))
-        }
         Err(step) => step,
         Ok(None) => StepOutcome::not_run("no recorded return"),
-        Ok(Some(expected)) => compare_with_recorded(actual, &expected, validated.field_id),
+        Ok(Some(expected)) => compare_with_recorded(actual, &expected),
     }
 }
 
-fn compare_with_recorded(actual: &DiffValue, expected: &DiffValue, field: FieldId) -> StepOutcome {
-    if let Err(reason) = values_equivalent(actual, expected) {
-        return StepOutcome::failed(
-            ComparableError::new(FailureKind::OracleMismatch, normalize_text(&reason)),
-            format!("interpreter returned {actual}"),
-        );
-    }
-    if field != FieldId::Bn254 || actual == expected {
-        StepOutcome::Passed
-    } else {
-        StepOutcome::failed(
+fn compare_with_recorded(actual: &DiffValue, expected: &DiffValue) -> StepOutcome {
+    match values_equivalent(actual, expected) {
+        Ok(()) if actual == expected => StepOutcome::Passed,
+        Ok(()) => StepOutcome::failed(
             ComparableError::new(
                 FailureKind::OracleMismatch,
                 "field value differs from the recorded return",
             ),
             format!("interpreter returned {actual}, recorded {expected}"),
-        )
+        ),
+        Err(reason) => StepOutcome::failed(
+            ComparableError::new(FailureKind::OracleMismatch, normalize_text(&reason)),
+            format!("interpreter returned {actual}"),
+        ),
     }
 }
 
@@ -733,41 +714,8 @@ mod tests {
         assert_eq!(record.oracle, StepOutcome::not_run("no recorded return"));
     }
 
-    /// bn254 records a return of `2^64`, which Goldilocks can hold neither as its result nor as a
-    /// recorded `Field`.
     #[test]
-    fn an_unrepresentable_recorded_return_leaves_the_return_check_not_run() {
-        let root = temp_noir_package(
-            "above_modulus",
-            "fn main(x: Field) -> pub Field { x * 4294967296 * 4294967296 }",
-        );
-        std::fs::write(
-            root.path().join("Prover.toml"),
-            "x = \"1\"\nreturn = \"18446744073709551616\"\n",
-        )
-        .unwrap();
-        let program = CorpusProgram {
-            name: "above_modulus".to_string(),
-            dir: root.path().to_path_buf(),
-            workspace: false,
-            source_hash: "unhashed".to_string(),
-        };
-
-        let bn254 = run_record(&program, FieldId::Bn254);
-        assert!(bn254.interpret.passed(), "{:?}", bn254.interpret);
-        assert!(bn254.oracle.passed(), "{:?}", bn254.oracle);
-
-        let goldilocks = run_record(&program, FieldId::Goldilocks);
-        assert!(goldilocks.interpret.passed(), "{:?}", goldilocks.interpret);
-        assert!(
-            matches!(&goldilocks.oracle, StepOutcome::NotRun { reason } if reason.starts_with("recorded return:")),
-            "{:?}",
-            goldilocks.oracle
-        );
-    }
-
-    #[test]
-    fn recorded_field_returns_are_compared_exactly_only_on_bn254() {
+    fn recorded_returns_are_compared_exactly() {
         let int = |v: u64| {
             DiffValue::from_value(&Value::Int(IntValue {
                 signed: false,
@@ -776,30 +724,11 @@ mod tests {
             }))
             .unwrap()
         };
-        assert!(compare_with_recorded(&int(7), &int(7), FieldId::linked()).passed());
-        let mismatch = compare_with_recorded(&int(7), &int(8), FieldId::linked());
+        assert!(compare_with_recorded(&int(7), &int(7)).passed());
+        let mismatch = compare_with_recorded(&int(7), &int(8));
         assert_eq!(
             mismatch.failure().map(|e| &e.kind),
             Some(&FailureKind::OracleMismatch)
         );
-
-        let field = |v: u64| {
-            DiffValue::from_value(&Value::Field(
-                acvm::FieldValue::try_from_biguint(u128::from(v).into(), FieldId::linked())
-                    .expect("the test values are below every modulus"),
-            ))
-            .unwrap()
-        };
-        // The corpus records bn254's `Field` values, so only a bn254 run compares them exactly.
-        assert_eq!(
-            compare_with_recorded(&field(1), &field(2), FieldId::Bn254)
-                .failure()
-                .map(|e| e.payload.as_str()),
-            Some("field value differs from the recorded return")
-        );
-        for other in FieldId::ALL.into_iter().filter(|id| *id != FieldId::Bn254) {
-            let differing = compare_with_recorded(&field(1), &field(2), other);
-            assert!(differing.passed(), "{other}: {differing:?}");
-        }
     }
 }
