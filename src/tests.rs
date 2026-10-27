@@ -470,6 +470,35 @@ fn goldilocks_refuses_an_entry_point_integer_that_can_reach_its_modulus() {
     }
 }
 
+/// A tuple or struct pattern parameter takes the whole argument, though the monomorphizer gives
+/// the function one parameter per leaf of the pattern: `sum` gets `1 + 2`, `swap` returns `(1, 3)`
+/// and the one-field `first` reads `5`, so `main` returns `9`.
+#[test]
+fn pattern_parameters_take_the_whole_argument() {
+    let source = "
+        struct Pair { a: u8, b: u8 }
+        struct One { inner: (u8, u8) }
+        fn sum(Pair { a, b }: Pair) -> u8 { a + b }
+        fn swap((x, y): (u8, u8)) -> (u8, u8) { (y, x) }
+        fn first(One { inner }: One) -> u8 { inner.0 }
+        fn main(x: u8) -> pub u8 {
+            let (s, t) = swap((sum(Pair { a: x, b: 2 }), 1));
+            s + t + first(One { inner: (5, 6) })
+        }
+    ";
+    let one = Value::Int(IntValue::canonical(false, 8, BigInt::from(1)));
+    for field in [FieldId::Bn254, FieldId::Goldilocks] {
+        let validated = compile_source(source, field);
+        let result = interpret_with_inputs(&validated.program, vec![one.clone()], field)
+            .unwrap_or_else(|error| panic!("{field}: {error}"));
+        assert_eq!(
+            result,
+            Value::Int(IntValue::canonical(false, 8, BigInt::from(9))),
+            "{field}"
+        );
+    }
+}
+
 /// A `&mut` threaded through `main -> twice -> bump` mutates one shared cell: `100 + 5 + 5 == 110`.
 #[test]
 fn interprets_reference_call_chain() {

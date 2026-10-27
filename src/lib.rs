@@ -49,7 +49,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use acvm::{FieldConfig, FieldId};
-use noirc_frontend::monomorphization::ast::{FuncId, Function, GlobalId, LocalId, Program};
+use noirc_frontend::monomorphization::ast::{FuncId, Function, GlobalId, LocalId, Program, Type};
 
 /// Per-call-frame local environment: each `LocalId` is unique within a monomorphized function.
 type Frame = HashMap<LocalId, Value>;
@@ -149,6 +149,15 @@ impl<'p> Interpreter<'p> {
             )));
         }
         let func = self.function(id)?;
+        let lined_up = func.parameters.len() == args.len()
+            && (func.parameters.iter())
+                .zip(&args)
+                .all(|((_, _, _, typ, _), arg)| tuple_shape_matches(arg, typ));
+        let args = if lined_up {
+            args
+        } else {
+            regroup_arguments(func, args)?
+        };
         if func.parameters.len() != args.len() {
             return Err(InterpretError::Internal(format!(
                 "function {id} expects {} arguments, got {}",
@@ -181,4 +190,67 @@ impl<'p> Interpreter<'p> {
             )),
         }
     }
+}
+
+/// Whether every tuple in `value` has the arity its place in `typ` names, all the way down.
+fn tuple_shape_matches(value: &Value, typ: &Type) -> bool {
+    match (value, typ) {
+        (Value::Tuple(cells), Type::Tuple(types)) => {
+            cells.len() == types.len()
+                && cells
+                    .iter()
+                    .zip(types)
+                    .all(|(cell, typ)| tuple_shape_matches(&cell.borrow(), typ))
+        }
+        (Value::Tuple(_), _) | (_, Type::Tuple(_)) => false,
+        _ => true,
+    }
+}
+
+/// The monomorphizer turns a tuple or struct pattern parameter into one parameter per leaf, while
+/// a call still passes the whole value: SSA flattens tuples on both sides of a call. Flatten the
+/// arguments' tuples the same way and regroup the leaves by the parameter types.
+fn regroup_arguments(func: &Function, args: Vec<Value>) -> Result<Vec<Value>, InterpretError> {
+    fn flatten(value: Value, leaves: &mut Vec<Value>) {
+        match value {
+            Value::Tuple(cells) => {
+                for cell in cells {
+                    flatten(cell.borrow().deep_copy(), leaves);
+                }
+            }
+            leaf => leaves.push(leaf),
+        }
+    }
+    fn regroup(typ: &Type, leaves: &mut impl Iterator<Item = Value>) -> Option<Value> {
+        match typ {
+            Type::Tuple(types) => types
+                .iter()
+                .map(|typ| regroup(typ, leaves))
+                .collect::<Option<_>>()
+                .map(Value::tuple),
+            _ => leaves.next(),
+        }
+    }
+    let leaf_count_differs = |which: &str| {
+        InterpretError::Internal(format!(
+            "the arguments of function {} have {which} leaves than its parameters",
+            func.id
+        ))
+    };
+
+    let mut leaves = Vec::new();
+    for arg in args {
+        flatten(arg, &mut leaves);
+    }
+    let mut leaves = leaves.into_iter();
+    let regrouped = func
+        .parameters
+        .iter()
+        .map(|(_, _, _, typ, _)| regroup(typ, &mut leaves))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| leaf_count_differs("fewer"))?;
+    if leaves.next().is_some() {
+        return Err(leaf_count_differs("more"));
+    }
+    Ok(regrouped)
 }
