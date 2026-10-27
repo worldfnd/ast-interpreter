@@ -413,41 +413,31 @@ fn bn254_casts_u64_to_field_exactly() {
         inputs_from_prover_toml(&validated.program, &validated.abi, &toml).expect("inputs");
     let result =
         interpret_with_inputs(&validated.program, inputs, validated.field_id).expect("interpret");
-    let expected =
-        acvm::FieldValue::try_from_biguint(u128::from(u64::MAX).into(), validated.field_id)
-            .expect("u64::MAX is below the bn254 modulus");
-    assert_eq!(result, Value::Field(expected));
+    // The `Field` is `u64::MAX`, returned as its eight little-endian bytes.
+    let byte = Value::Int(IntValue::canonical(false, 8, BigInt::from(0xffu8)));
+    assert_eq!(result, Value::Array(vec![byte; 8]));
 }
 
+/// Integers whose values reach the Goldilocks modulus are entry-point types under every field,
+/// since inputs and returns are read as bytes: a `u128` input of `2^65`, and `i64` inputs and
+/// returns.
 #[test]
-fn goldilocks_refuses_an_entry_point_integer_that_can_reach_its_modulus() {
-    for name in [
-        "interp_inputs_i64",
-        "interp_return_i64",
-        "neg_wide_input_u128",
+fn wide_entry_point_integers_run_under_every_field() {
+    for (name, expected) in [
+        (
+            "interp_inputs_u128",
+            IntValue::canonical(false, 128, BigInt::from(1u8) << 65usize),
+        ),
+        (
+            "interp_inputs_i64",
+            IntValue::canonical(true, 64, BigInt::from(-4294967296i64)),
+        ),
+        (
+            "interp_return_i64",
+            IntValue::canonical(true, 64, BigInt::from(-1)),
+        ),
     ] {
-        let project = NoirProject::new(fixture(name)).expect("project");
-        assert!(
-            compile_for_validation(&project, FieldId::Bn254).is_ok(),
-            "{name}: bn254 takes this entry point"
-        );
-        let error = match compile_for_validation(&project, FieldId::Goldilocks) {
-            Ok(_) => panic!("{name}: this entry point must not compile under Goldilocks"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("Invalid type found in the entry point to a program"),
-            "{name}: {error}"
-        );
-        assert!(
-            error
-                .detail()
-                .contains("bits are not valid entry point types under goldilocks"),
-            "{name}: refused by the lowerable rule rather than the modulus one: {}",
-            error.detail()
-        );
+        assert_fixture_return(name, Value::Int(expected));
     }
 }
 
@@ -644,7 +634,7 @@ fn interprets_program_with_inputs() {
 }
 
 /// Differential correctness: the interpreter's computed return value matches the expected output
-/// Noir's corpus records in `Prover.toml`. `arithmetic_binary_operations` returns the `Field` 10
+/// Noir's corpus records in `Prover.toml`. `arithmetic_binary_operations` returns the `u8` 10
 /// under both fields, so this verifies the actual value, not merely that interpretation didn't
 /// error.
 #[test]
@@ -689,8 +679,8 @@ fn interprets_integer_widths() {
         (128, 16),
         (16384, 16),
     ] {
-        // Every width fixture takes `u8` inputs and returns a `u8`: an entry point carries only
-        // the lowerable integer types, so the width under test lives in a helper.
+        // Every width fixture takes `u8` inputs and returns a `u8`; the width under test lives in
+        // a helper.
         assert_fixture_return(
             &format!("interp_width_{bits}"),
             Value::Int(IntValue::canonical(false, 8, BigInt::from(returned))),
@@ -771,19 +761,6 @@ fn interprets_stdlib_fixtures() {
     }
 }
 
-#[test]
-fn bn254_accepts_input_above_the_goldilocks_modulus() {
-    assert_fixture_return_under(
-        FieldId::Bn254,
-        "neg_wide_input_u128",
-        Value::Int(IntValue::canonical(
-            false,
-            128,
-            BigInt::from(1u8) << 65usize,
-        )),
-    );
-}
-
 /// Noir's benchmark mode compiles the field-generic twins of `Field::lt` and the wrapping ops on
 /// bn254; they compute the same values as the bn254 halves, which `interprets_stdlib_fixtures`
 /// pins.
@@ -810,12 +787,19 @@ fn generic_builtins_select_the_limb_hash_on_bn254() {
     const MULTIPLIER: u64 = 0x1_0000_0001_b3;
     // `main` hashes `x + 2^32` with `Prover.toml`'s `x = 7`.
     let wide: u64 = 7 + (1 << 32);
+    // `main` returns the hash as eight little-endian bytes.
     let hash_under = |field: FieldId, generic_builtins: bool| {
         let (value, recorded) = run_fixture_with(field, "interp_generic_twins", generic_builtins);
-        let Value::Field(element) = &value else {
+        let Value::Array(bytes) = &value else {
             panic!("{value:?}")
         };
-        let element = element.as_biguint().clone();
+        let element = bytes
+            .iter()
+            .rev()
+            .fold(BigUint::ZERO, |hash, byte| match byte {
+                Value::Int(byte) => (hash << 8u8) + byte.value.to_biguint().expect("a byte"),
+                other => panic!("{other:?}"),
+            });
         (element, recorded == Some(value))
     };
     let (one_write, recorded_agrees) = hash_under(FieldId::Bn254, false);
@@ -884,31 +868,14 @@ fn finite_recursion_at_the_call_limit_is_a_coverage_gap() {
     );
 }
 
-/// An entry point carries only the integer types the circuit backend lowers, under every field:
-/// `u24` is legal inside a program and refused on `main`.
+/// An entry point takes an integer of any width from 2 to 16384 bits, under every field: `u24`
+/// is no width a circuit backend lowers natively.
 #[test]
-fn the_entry_point_takes_only_lowerable_integer_types() {
-    let project = NoirProject::new(negative_fixture("entry_width_u24")).expect("project");
-    for field in [FieldId::Bn254, FieldId::Goldilocks] {
-        let error = match compile_for_validation(&project, field) {
-            Ok(_) => panic!("{field}: a u24 entry point must not compile"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .summary()
-                .contains("Invalid type found in the entry point to a program"),
-            "{field}: {}",
-            error.summary()
-        );
-        assert!(
-            error.detail().contains(
-                "Integers the circuit backend does not lower are not valid entry point types. Found: u24"
-            ),
-            "{field}: {}",
-            error.detail()
-        );
-    }
+fn the_entry_point_takes_any_integer_width() {
+    assert_fixture_return(
+        "interp_entry_width_u24",
+        Value::Int(IntValue::canonical(false, 24, BigInt::from(8))),
+    );
 }
 
 // --- Differential oracle: interpreter vs Noir's own ACVM/Brillig executor (see `noir_oracle.rs`).

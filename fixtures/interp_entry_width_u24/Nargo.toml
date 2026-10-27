@@ -1,5 +1,5 @@
 [package]
-name = "neg_wide_input_u128"
+name = "interp_entry_width_u24"
 type = "bin"
 authors = [""]
 

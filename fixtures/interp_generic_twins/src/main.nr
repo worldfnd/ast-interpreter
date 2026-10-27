@@ -16,9 +16,9 @@ impl Hasher for Recorder {
     }
 }
 
-fn main(x: u32) -> pub Field {
+fn main(x: u32) -> pub [u8; 8] {
     let wide: u64 = (x as u64) + 0x100000000;
     let mut hasher = Recorder { state: 0 };
     wide.hash(&mut hasher);
-    hasher.finish()
+    hasher.finish().to_le_bytes()
 }
